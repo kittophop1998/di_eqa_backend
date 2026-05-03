@@ -119,6 +119,16 @@ func (s *SessionHandler) Start(c *gin.Context) {
 		},
 	})
 
+	// broadcast ไปที่ hospital room เพื่อให้เฉพาะ user ของ รพ. นั้นเห็น banner
+	s.Hub.Broadcast("hospital:"+session.HospitalID.Hex(), ws.Message{
+		Type: "session:start",
+		Payload: map[string]interface{}{
+			"sessionId": session.ID.Hex(),
+			"quizId":    session.QuizID.Hex(),
+			"startedAt": now,
+		},
+	})
+
 	c.JSON(http.StatusOK, session)
 }
 
@@ -186,6 +196,20 @@ func (s *SessionHandler) GetByCode(c *gin.Context) {
 func (s *SessionHandler) ListActive(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
+
+	// กรอง session ตาม hospitalId ของ user ที่ request
+	hid, _ := c.Get("hospitalId")
+
+	filter := bson.M{"status": bson.M{"$in": []string{models.SessionPending, models.SessionRunning}}}
+
+	// admin/instructor เห็นทุก session ของ รพ. ตัวเอง, user ทั่วไปก็เห็นของ รพ. ตัวเองเช่นกัน
+	if hidStr, ok := hid.(string); ok && hidStr != "" {
+		hospID, err := primitive.ObjectIDFromHex(hidStr)
+		if err == nil {
+			filter["hospitalId"] = hospID
+		}
+	}
+
 	cur, err := s.SessionColl.Find(ctx,
 		bson.M{"status": bson.M{"$in": []string{models.SessionPending, models.SessionRunning}}},
 		options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}).SetLimit(50),

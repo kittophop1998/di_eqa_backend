@@ -59,9 +59,19 @@ func (h *QuizHandler) List(c *gin.Context) {
 	quizFilter := bson.M{}
 
 	if userRole != models.RoleAdmin && userRole != models.RoleInstructor {
-		// ดึง quizId ที่มี active session เท่านั้น
+		// ดึง quizId ที่มี active session ของ รพ. ของ user เท่านั้น
 		activeStatuses := []string{models.SessionPending, models.SessionRunning}
-		cur, err := h.SessionColl.Find(ctx, bson.M{"status": bson.M{"$in": activeStatuses}})
+		hid, _ := c.Get("hospitalId")
+		hidStr, _ := hid.(string)
+
+		sessionFilter := bson.M{"status": bson.M{"$in": activeStatuses}}
+		if hidStr != "" {
+			if hospID, err := primitive.ObjectIDFromHex(hidStr); err == nil {
+				sessionFilter["hospitalId"] = hospID
+			}
+		}
+
+		cur, err := h.SessionColl.Find(ctx, sessionFilter)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -135,6 +145,7 @@ func (h *QuizHandler) Get(c *gin.Context) {
 	defer cancel()
 
 	// ถ้าส่ง ?session= มาและไม่ใช่ admin ให้ตรวจสถานะ session ว่าต้อง running
+	// และตรวจว่า session นั้นเป็นของ รพ. ของ user คนนั้น
 	if sessionIDStr := c.Query("session"); sessionIDStr != "" && userRole != models.RoleAdmin {
 		sessionOID, err := primitive.ObjectIDFromHex(sessionIDStr)
 		if err != nil {
@@ -149,6 +160,15 @@ func (h *QuizHandler) Get(c *gin.Context) {
 		if sess.Status != models.SessionRunning {
 			c.JSON(http.StatusForbidden, gin.H{"error": "session has not started yet"})
 			return
+		}
+		// ตรวจ hospital: user ต้องอยู่ รพ. เดียวกับ session
+		hid, _ := c.Get("hospitalId")
+		if hidStr, ok := hid.(string); ok && hidStr != "" {
+			userHospID, err := primitive.ObjectIDFromHex(hidStr)
+			if err != nil || userHospID != sess.HospitalID {
+				c.JSON(http.StatusForbidden, gin.H{"error": "session does not belong to your hospital"})
+				return
+			}
 		}
 	}
 
@@ -333,7 +353,7 @@ func (h *QuizHandler) Submit(c *gin.Context) {
 		trueCounts[cell.CorrectType]++
 		answers = append(answers, models.CellAnswer{
 			CellID:       cell.ID,
-			ImageURL:     cell.ImageURL,
+			ImageURL:     h.buildImageURL(cell.Path),
 			AssignedType: assigned,
 			CorrectType:  cell.CorrectType,
 			IsCorrect:    isCorrect,
