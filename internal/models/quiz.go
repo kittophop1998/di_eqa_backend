@@ -15,11 +15,13 @@ type CellCategory struct {
 }
 
 // CellImage คือรูปเซลล์ 1 ใบในข้อสอบ — ผู้ใช้ต้องบอกว่าเซลล์นี้เป็นชนิดอะไร
-// ImageURL รับได้ทั้ง http(s) และ data URI (เราใช้ data URI ที่ฝัง SVG ใน seed)
+// AssetID อ้างอิง _id ใน collection cell_image_assets
+// ImageURL คือ public URL เต็มของรูป (สร้างจาก SupabaseURL + bucket + path)
 type CellImage struct {
-	ID          string `bson:"id" json:"id"`
-	ImageURL    string `bson:"imageUrl" json:"imageUrl"`
-	CorrectType string `bson:"correctType" json:"correctType,omitempty"`
+	ID          string             `bson:"id" json:"id"`
+	AssetID     primitive.ObjectID `bson:"assetId,omitempty" json:"assetId,omitempty"`
+	ImageURL    string             `bson:"imageUrl" json:"imageUrl"`
+	CorrectType string             `bson:"correctType" json:"correctType,omitempty"`
 }
 
 // Quiz ในเวอร์ชันนี้เปลี่ยนจาก "Multiple choice" → "Cell classification"

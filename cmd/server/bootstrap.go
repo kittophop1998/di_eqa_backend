@@ -46,7 +46,7 @@ func Bootstrap() *App {
 	log.Println("✅ redis connected")
 
 	// 4. Seed initial data (non-fatal)
-	if err := seed.Run(mongoConn.DB); err != nil {
+	if err := seed.Run(mongoConn.DB, cfg.SupabaseURL, cfg.SupabaseBucket); err != nil {
 		log.Printf("⚠️  seed warning: %v", err)
 	} else {
 		log.Println("✅ seed completed")

@@ -12,11 +12,12 @@ import (
 
 	"github.com/di-eqa/backend/internal/models"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"golang.org/x/crypto/bcrypt"
 )
 
-func Run(db *mongo.Database) error {
+func Run(db *mongo.Database, supabaseURL, supabaseBucket string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -24,6 +25,7 @@ func Run(db *mongo.Database) error {
 	usersColl := db.Collection("users")
 	quizzesColl := db.Collection("quizzes")
 	submissionsColl := db.Collection("submissions")
+	cellImageAssetsColl := db.Collection("cell_image_assets")
 
 	_, _ = hospitalsColl.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "code", Value: 1}},
@@ -32,27 +34,24 @@ func Run(db *mongo.Database) error {
 		Keys: bson.D{{Key: "hospitalId", Value: 1}, {Key: "username", Value: 1}},
 	})
 
+	// ── seed cell_image_assets จาก public/types (idempotent) ─────────────────
+	// publicTypesDir := filepath.Join(".", "public", "types")
+	// if err := seedCellImageAssets(ctx, cellImageAssetsColl, publicTypesDir); err != nil {
+	// 	log.Printf("⚠️  seedCellImageAssets: %v", err)
+	// }
+	// ─────────────────────────────────────────────────────────────────────────
+
 	if err := seedHospitals(ctx, hospitalsColl); err != nil {
 		return err
 	}
 	if err := seedUsers(ctx, usersColl, hospitalsColl); err != nil {
 		return err
 	}
-	if err := seedQuizzes(ctx, quizzesColl, submissionsColl, usersColl); err != nil {
+	if err := seedQuizzes(ctx, quizzesColl, submissionsColl, usersColl, cellImageAssetsColl, supabaseURL, supabaseBucket); err != nil {
 		return err
 	}
 
-	// ── ONE-TIME SEED: cell_image_assets ──────────────────────────────────────
-	// ใช้เพื่อ insert path รูปจาก public/types เข้า MongoDB ครั้งเดียว
-	// เปิด comment ด้านล่าง → restart server → ตรวจสอบ log → comment กลับ
-	//
-	// cellImageAssetsColl := db.Collection("cell_image_assets")
-	// publicTypesDir := filepath.Join(".", "public", "types") // relative จาก working dir ของ binary
-	// if err := seedCellImageAssets(ctx, cellImageAssetsColl, publicTypesDir); err != nil {
-	// 	return err
-	// }
-	// ─────────────────────────────────────────────────────────────────────────
-
+	// ── ลบ ONE-TIME block เก่าออก ─────────────────────────────────────────────
 	return nil
 }
 
@@ -127,8 +126,9 @@ func seedUsers(ctx context.Context, usersColl, hospitalsColl *mongo.Collection) 
 
 // seedQuizzes สร้างข้อสอบ DI EQA แบบ "Cell Classification" (100 เซลล์)
 // ถ้าเจอข้อสอบสคีมาเก่า (ไม่มี field cells) จะลบทิ้งแล้วเริ่มใหม่
-// — เพื่อให้ migration จาก schema เดิมเป็นอัตโนมัติบน dev environment
-func seedQuizzes(ctx context.Context, quizzesColl, submissionsColl, usersColl *mongo.Collection) error {
+// รูปเซลล์จะดึงจาก collection cell_image_assets (ที่ seed ไว้จาก public/types)
+// ถ้ายังไม่มี assets ใน DB จะ fallback เป็น SVG data URI แบบเดิม
+func seedQuizzes(ctx context.Context, quizzesColl, submissionsColl, usersColl, assetsColl *mongo.Collection, supabaseURL, supabaseBucket string) error {
 	// ลบข้อสอบเก่าที่ยังเป็น schema multiple-choice (ไม่มี field "cells")
 	delRes, _ := quizzesColl.DeleteMany(ctx, bson.M{"cells": bson.M{"$exists": false}})
 	if delRes != nil && delRes.DeletedCount > 0 {
@@ -170,16 +170,67 @@ func seedQuizzes(ctx context.Context, quizzesColl, submissionsColl, usersColl *m
 
 	cells := make([]models.CellImage, 0, 100)
 	rng := rand.New(rand.NewSource(42))
+
+	// ── ดึงรูปจาก cell_image_assets ────────────────────────────────────────
+	// จัดกลุ่ม assets ตาม cellType แล้วสุ่มเลือกตาม plan
+	type assetDoc struct {
+		ID       primitive.ObjectID `bson:"_id"`
+		CellType string             `bson:"cellType"`
+		Path     string             `bson:"path"`
+	}
+	assetsByType := map[string][]assetDoc{}
+	cur, err := assetsColl.Find(ctx, bson.M{})
+	if err == nil {
+		var allAssets []assetDoc
+		_ = cur.All(ctx, &allAssets)
+		for _, a := range allAssets {
+			assetsByType[a.CellType] = append(assetsByType[a.CellType], a)
+		}
+	}
+
+	// สร้าง public URL จาก Supabase path
+	buildImageURL := func(path string) string {
+		if supabaseURL == "" {
+			return ""
+		}
+		return strings.TrimRight(supabaseURL, "/") +
+			"/storage/v1/object/public/" + supabaseBucket + "/" + path
+	}
+
+	useRealImages := len(assetsByType) > 0 && supabaseURL != ""
+	if !useRealImages {
+		log.Printf("⚠️  cell_image_assets ไม่พบ หรือ SUPABASE_URL ว่างเปล่า — ใช้ SVG fallback")
+	}
+
 	idx := 0
 	for _, p := range plan {
+		typeAssets := assetsByType[p.kind]
+		// shuffle assets ของแต่ละ type เพื่อสุ่มเลือก
+		rng.Shuffle(len(typeAssets), func(i, j int) { typeAssets[i], typeAssets[j] = typeAssets[j], typeAssets[i] })
+
 		for i := 0; i < p.count; i++ {
 			idx++
-			svg := renderCellSVG(p.kind, int64(idx)*131+rng.Int63n(1000))
-			cells = append(cells, models.CellImage{
-				ID:          fmt.Sprintf("c%03d", idx),
-				ImageURL:    svgToDataURI(svg),
-				CorrectType: p.kind,
-			})
+			cellID := fmt.Sprintf("c%03d", idx)
+
+			var cell models.CellImage
+			if useRealImages && i < len(typeAssets) {
+				a := typeAssets[i]
+				cell = models.CellImage{
+					ID:          cellID,
+					AssetID:     a.ID,
+					ImageURL:    buildImageURL(a.Path),
+					CorrectType: p.kind,
+				}
+			} else {
+				// fallback: generate SVG
+				svg := renderCellSVG(p.kind, int64(idx)*131+rng.Int63n(1000))
+				cell = models.CellImage{
+					ID:          cellID,
+					ImageURL:    svgToDataURI(svg),
+					CorrectType: p.kind,
+				}
+			}
+			cells = append(cells, cell)
 		}
 	}
 	// shuffle เพื่อให้เซลล์แต่ละชนิดกระจายไม่เรียงเป็นกอง ๆ
