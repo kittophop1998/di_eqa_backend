@@ -21,9 +21,9 @@ type Config struct {
 func Load() *Config {
 	return &Config{
 		Port:           getEnv("PORT", "8080"),
-		MongoURI:       getEnv("MONGO_URI", "mongodb://mongo:27017"),
+		MongoURI:       getEnv("MONGO_URI", "mongodb://mongo:KLxyQQuDatRnCUkzCnIlVWkdrPKKdSNx@switchyard.proxy.rlwy.net:30785"),
 		MongoDB:        getEnv("MONGO_DB", "di_eqa"),
-		RedisAddr:      getEnv("REDIS_URL", getEnv("REDIS_ADDR", "redis:6379")), // รองรับ Railway REDIS_URL และ addr แบบเดิม
+		RedisAddr:      getEnv("REDIS_URL", "redis://default:JIsSLuyrMwhkMLmVFtoSsppjihXJmuGj@autorack.proxy.rlwy.net:26026"), // รองรับ Railway REDIS_URL และ addr แบบเดิม
 		RedisPassword:  getEnv("REDIS_PASSWORD", ""),
 		JWTSecret:      getEnv("JWT_SECRET", "change-me-in-production-please-this-is-a-dev-secret"),
 		JWTExpiry:      12 * time.Hour,

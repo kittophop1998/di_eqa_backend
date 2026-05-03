@@ -17,11 +17,13 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 	"golang.org/x/crypto/bcrypt"
 )
 
 func Run(db *mongo.Database, supabaseURL, supabaseBucket string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// ใช้ timeout นานขึ้นเพราะ seedCellImageAssets ต้อง insert รูปหลายพันไฟล์
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	hospitalsColl := db.Collection("hospitals")
@@ -40,10 +42,10 @@ func Run(db *mongo.Database, supabaseURL, supabaseBucket string) error {
 	// ── seed cell_image_assets จาก public/types (idempotent) ─────────────────
 	// ถ้า folder ว่างเปล่า (เช่น บน production server ที่ไม่มีรูปใน git)
 	// จะ fallback ไปดึง list รูปจาก Supabase Storage แทน
-	publicTypesDir := filepath.Join(".", "public", "types")
-	if err := seedCellImageAssets(ctx, cellImageAssetsColl, publicTypesDir, supabaseURL, supabaseBucket); err != nil {
-		log.Printf("⚠️  seedCellImageAssets: %v", err)
-	}
+	// publicTypesDir := filepath.Join(".", "public", "types")
+	// if err := seedCellImageAssets(ctx, cellImageAssetsColl, publicTypesDir, supabaseURL, supabaseBucket); err != nil {
+	// 	log.Printf("⚠️  seedCellImageAssets: %v", err)
+	// }
 	// ─────────────────────────────────────────────────────────────────────────
 
 	if err := seedHospitals(ctx, hospitalsColl); err != nil {
@@ -275,7 +277,7 @@ func seedCellImageAssets(ctx context.Context, coll *mongo.Collection, publicType
 	return nil
 }
 
-// seedFromLocalFS อ่านรูปจาก filesystem แล้ว insert ลง MongoDB
+// seedFromLocalFS อ่านรูปจาก filesystem แล้ว insert ลง MongoDB โดยใช้ InsertMany แบบ batch
 // คืน (inserted, skipped, error)
 func seedFromLocalFS(ctx context.Context, coll *mongo.Collection, publicTypesDir string) (int, int, error) {
 	entries, err := os.ReadDir(publicTypesDir)
@@ -283,8 +285,14 @@ func seedFromLocalFS(ctx context.Context, coll *mongo.Collection, publicTypesDir
 		return 0, 0, fmt.Errorf("cannot read dir %s: %w", publicTypesDir, err)
 	}
 
-	total := 0
+	// ดึง paths ที่มีอยู่แล้วทั้งหมดมาเก็บใน set เดียว (ทำ 1 query แทนที่จะทำทีละไฟล์)
+	existingPaths, err := fetchExistingPaths(ctx, coll)
+	if err != nil {
+		return 0, 0, err
+	}
+
 	skipped := 0
+	var batch []interface{}
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -311,32 +319,38 @@ func seedFromLocalFS(ctx context.Context, coll *mongo.Collection, publicTypesDir
 
 			path := cellType + "/" + name
 
-			count, _ := coll.CountDocuments(ctx, bson.M{"path": path})
-			if count > 0 {
+			if existingPaths[path] {
 				skipped++
 				continue
 			}
 
-			asset := models.CellImageAsset{
+			batch = append(batch, models.CellImageAsset{
 				CellType:  cellType,
 				Filename:  name,
 				Path:      path,
 				CreatedAt: time.Now(),
-			}
-			if _, err := coll.InsertOne(ctx, asset); err != nil {
-				return total, skipped, fmt.Errorf("insert %s: %w", path, err)
-			}
-			total++
+			})
 		}
 	}
-	return total, skipped, nil
+
+	if len(batch) == 0 {
+		return 0, skipped, nil
+	}
+
+	total, err := insertManyBatch(ctx, coll, batch)
+	return total, skipped, err
 }
 
-// seedFromSupabase ดึง list object จาก Supabase Storage REST API แล้ว insert ลง MongoDB
+// seedFromSupabase ดึง list object จาก Supabase Storage REST API แล้ว insert ลง MongoDB (batch)
 // ใช้ตอนที่ local public/types ว่างเปล่า (production deployment ที่ images ไม่ได้อยู่ใน git)
 func seedFromSupabase(ctx context.Context, coll *mongo.Collection, supabaseURL, bucket string) (int, int, error) {
-	total := 0
+	existingPaths, err := fetchExistingPaths(ctx, coll)
+	if err != nil {
+		return 0, 0, err
+	}
+
 	skipped := 0
+	var batch []interface{}
 
 	for _, cellType := range knownCellTypes {
 		// Supabase Storage List API: POST /storage/v1/object/list/{bucket}
@@ -380,23 +394,66 @@ func seedFromSupabase(ctx context.Context, coll *mongo.Collection, supabaseURL, 
 
 			path := cellType + "/" + name
 
-			count, _ := coll.CountDocuments(ctx, bson.M{"path": path})
-			if count > 0 {
+			if existingPaths[path] {
 				skipped++
 				continue
 			}
 
-			asset := models.CellImageAsset{
+			batch = append(batch, models.CellImageAsset{
 				CellType:  cellType,
 				Filename:  name,
 				Path:      path,
 				CreatedAt: time.Now(),
-			}
-			if _, err := coll.InsertOne(ctx, asset); err != nil {
-				return total, skipped, fmt.Errorf("insert %s: %w", path, err)
-			}
-			total++
+			})
 		}
 	}
-	return total, skipped, nil
+
+	if len(batch) == 0 {
+		return 0, skipped, nil
+	}
+
+	total, err := insertManyBatch(ctx, coll, batch)
+	return total, skipped, err
+}
+
+// fetchExistingPaths ดึง path ทั้งหมดที่มีอยู่ใน collection มาเก็บเป็น set
+// เพื่อ check ซ้ำได้เร็วโดยไม่ต้อง query ทีละ document
+func fetchExistingPaths(ctx context.Context, coll *mongo.Collection) (map[string]bool, error) {
+	cur, err := coll.Find(ctx, bson.M{}, &options.FindOptions{
+		Projection: bson.M{"path": 1, "_id": 0},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("fetchExistingPaths: %w", err)
+	}
+	defer cur.Close(ctx)
+
+	set := map[string]bool{}
+	for cur.Next(ctx) {
+		var doc struct {
+			Path string `bson:"path"`
+		}
+		if err := cur.Decode(&doc); err == nil && doc.Path != "" {
+			set[doc.Path] = true
+		}
+	}
+	return set, cur.Err()
+}
+
+// insertManyBatch insert slice ของ documents ทีละ 500 ชิ้นเพื่อป้องกัน payload ใหญ่เกิน
+// คืนจำนวน documents ที่ insert สำเร็จ
+func insertManyBatch(ctx context.Context, coll *mongo.Collection, docs []interface{}) (int, error) {
+	const batchSize = 500
+	total := 0
+	for i := 0; i < len(docs); i += batchSize {
+		end := i + batchSize
+		if end > len(docs) {
+			end = len(docs)
+		}
+		res, err := coll.InsertMany(ctx, docs[i:end])
+		if err != nil {
+			return total, fmt.Errorf("insertManyBatch: %w", err)
+		}
+		total += len(res.InsertedIDs)
+	}
+	return total, nil
 }
