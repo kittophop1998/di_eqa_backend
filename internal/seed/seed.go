@@ -35,10 +35,10 @@ func Run(db *mongo.Database, supabaseURL, supabaseBucket string) error {
 	})
 
 	// ── seed cell_image_assets จาก public/types (idempotent) ─────────────────
-	publicTypesDir := filepath.Join(".", "public", "types")
-	if err := seedCellImageAssets(ctx, cellImageAssetsColl, publicTypesDir); err != nil {
-		log.Printf("⚠️  seedCellImageAssets: %v", err)
-	}
+	// publicTypesDir := filepath.Join(".", "public", "types")
+	// if err := seedCellImageAssets(ctx, cellImageAssetsColl, publicTypesDir); err != nil {
+	// 	log.Printf("⚠️  seedCellImageAssets: %v", err)
+	// }
 	// ─────────────────────────────────────────────────────────────────────────
 
 	if err := seedHospitals(ctx, hospitalsColl); err != nil {
