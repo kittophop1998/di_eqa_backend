@@ -1,0 +1,272 @@
+package seed
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"math/rand"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/di-eqa/backend/internal/models"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"golang.org/x/crypto/bcrypt"
+)
+
+func Run(db *mongo.Database) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	hospitalsColl := db.Collection("hospitals")
+	usersColl := db.Collection("users")
+	quizzesColl := db.Collection("quizzes")
+	submissionsColl := db.Collection("submissions")
+
+	_, _ = hospitalsColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "code", Value: 1}},
+	})
+	_, _ = usersColl.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "hospitalId", Value: 1}, {Key: "username", Value: 1}},
+	})
+
+	if err := seedHospitals(ctx, hospitalsColl); err != nil {
+		return err
+	}
+	if err := seedUsers(ctx, usersColl, hospitalsColl); err != nil {
+		return err
+	}
+	if err := seedQuizzes(ctx, quizzesColl, submissionsColl, usersColl); err != nil {
+		return err
+	}
+
+	// ── ONE-TIME SEED: cell_image_assets ──────────────────────────────────────
+	// ใช้เพื่อ insert path รูปจาก public/types เข้า MongoDB ครั้งเดียว
+	// เปิด comment ด้านล่าง → restart server → ตรวจสอบ log → comment กลับ
+	//
+	// cellImageAssetsColl := db.Collection("cell_image_assets")
+	// publicTypesDir := filepath.Join(".", "public", "types") // relative จาก working dir ของ binary
+	// if err := seedCellImageAssets(ctx, cellImageAssetsColl, publicTypesDir); err != nil {
+	// 	return err
+	// }
+	// ─────────────────────────────────────────────────────────────────────────
+
+	return nil
+}
+
+func seedHospitals(ctx context.Context, coll *mongo.Collection) error {
+	hospitals := []models.Hospital{
+		{Code: "HOSP001", Name: "โรงพยาบาลศิริราช", Province: "กรุงเทพมหานคร", Logo: "🏥"},
+		{Code: "HOSP002", Name: "โรงพยาบาลจุฬาลงกรณ์ สภากาชาดไทย", Province: "กรุงเทพมหานคร", Logo: "🏥"},
+		{Code: "HOSP003", Name: "โรงพยาบาลรามาธิบดี", Province: "กรุงเทพมหานคร", Logo: "🏥"},
+		{Code: "HOSP004", Name: "โรงพยาบาลมหาราชนครเชียงใหม่", Province: "เชียงใหม่", Logo: "🏥"},
+		{Code: "HOSP005", Name: "โรงพยาบาลสงขลานครินทร์", Province: "สงขลา", Logo: "🏥"},
+		{Code: "HOSP006", Name: "โรงพยาบาลศรีนครินทร์ ขอนแก่น", Province: "ขอนแก่น", Logo: "🏥"},
+	}
+	for _, h := range hospitals {
+		count, err := coll.CountDocuments(ctx, bson.M{"code": h.Code})
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			h.CreatedAt = time.Now()
+			if _, err := coll.InsertOne(ctx, h); err != nil {
+				return err
+			}
+			log.Printf("🏥 seeded hospital: %s - %s", h.Code, h.Name)
+		}
+	}
+	return nil
+}
+
+func seedUsers(ctx context.Context, usersColl, hospitalsColl *mongo.Collection) error {
+	var siriraj models.Hospital
+	if err := hospitalsColl.FindOne(ctx, bson.M{"code": "HOSP001"}).Decode(&siriraj); err != nil {
+		return err
+	}
+
+	defaultUsers := []struct {
+		Username string
+		FullName string
+		Password string
+		Role     string
+	}{
+		{"admin", "ผู้ดูแลระบบ", "admin1234", models.RoleAdmin},
+		{"trainer", "วิทยากรอบรม", "trainer1234", models.RoleInstructor},
+		{"trainee01", "ผู้เข้าอบรม คนที่ 1", "trainee1234", models.RoleUser},
+		{"trainee02", "ผู้เข้าอบรม คนที่ 2", "trainee1234", models.RoleUser},
+	}
+
+	for _, u := range defaultUsers {
+		count, err := usersColl.CountDocuments(ctx, bson.M{"hospitalId": siriraj.ID, "username": u.Username})
+		if err != nil {
+			return err
+		}
+		if count > 0 {
+			continue
+		}
+		hash, _ := bcrypt.GenerateFromPassword([]byte(u.Password), bcrypt.DefaultCost)
+		user := models.User{
+			HospitalID: siriraj.ID,
+			Username:   u.Username,
+			FullName:   u.FullName,
+			Email:      u.Username + "@siriraj.local",
+			Password:   string(hash),
+			Role:       u.Role,
+			CreatedAt:  time.Now(),
+		}
+		if _, err := usersColl.InsertOne(ctx, user); err != nil {
+			return err
+		}
+		log.Printf("👤 seeded user: %s/%s (role=%s)", siriraj.Code, u.Username, u.Role)
+	}
+	return nil
+}
+
+// seedQuizzes สร้างข้อสอบ DI EQA แบบ "Cell Classification" (100 เซลล์)
+// ถ้าเจอข้อสอบสคีมาเก่า (ไม่มี field cells) จะลบทิ้งแล้วเริ่มใหม่
+// — เพื่อให้ migration จาก schema เดิมเป็นอัตโนมัติบน dev environment
+func seedQuizzes(ctx context.Context, quizzesColl, submissionsColl, usersColl *mongo.Collection) error {
+	// ลบข้อสอบเก่าที่ยังเป็น schema multiple-choice (ไม่มี field "cells")
+	delRes, _ := quizzesColl.DeleteMany(ctx, bson.M{"cells": bson.M{"$exists": false}})
+	if delRes != nil && delRes.DeletedCount > 0 {
+		log.Printf("🧹 removed %d legacy multiple-choice quizzes", delRes.DeletedCount)
+		// ลบ submissions เดิมด้วยเพราะเฉลย/answers structure ต่างกัน
+		_, _ = submissionsColl.DeleteMany(ctx, bson.M{"answers.choiceId": bson.M{"$exists": true}})
+	}
+
+	count, err := quizzesColl.CountDocuments(ctx, bson.M{})
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+
+	var trainer models.User
+	_ = usersColl.FindOne(ctx, bson.M{"username": "trainer"}).Decode(&trainer)
+
+	// 4 ชนิดเซลล์เม็ดเลือดขาวที่พบบ่อย — สีของ chip จะใช้ฝั่ง UI
+	categories := []models.CellCategory{
+		{Key: "neutrophil", Label: "Neutrophil", Color: "#7c3aed"},
+		{Key: "lymphocyte", Label: "Lymphocyte", Color: "#2563eb"},
+		{Key: "eosinophil", Label: "Eosinophil", Color: "#ea580c"},
+		{Key: "monocyte", Label: "Monocyte", Color: "#0891b2"},
+	}
+
+	// distribution ใกล้เคียงเลือดปกติ: Neutrophil ~60%, Lymphocyte ~28%,
+	// Monocyte ~7%, Eosinophil ~5% — รวม 100 เซลล์
+	plan := []struct {
+		kind  string
+		count int
+	}{
+		{"neutrophil", 60},
+		{"lymphocyte", 28},
+		{"monocyte", 7},
+		{"eosinophil", 5},
+	}
+
+	cells := make([]models.CellImage, 0, 100)
+	rng := rand.New(rand.NewSource(42))
+	idx := 0
+	for _, p := range plan {
+		for i := 0; i < p.count; i++ {
+			idx++
+			svg := renderCellSVG(p.kind, int64(idx)*131+rng.Int63n(1000))
+			cells = append(cells, models.CellImage{
+				ID:          fmt.Sprintf("c%03d", idx),
+				ImageURL:    svgToDataURI(svg),
+				CorrectType: p.kind,
+			})
+		}
+	}
+	// shuffle เพื่อให้เซลล์แต่ละชนิดกระจายไม่เรียงเป็นกอง ๆ
+	rng.Shuffle(len(cells), func(i, j int) { cells[i], cells[j] = cells[j], cells[i] })
+
+	q := models.Quiz{
+		Title:       "DI EQA — นับแยกชนิดเซลล์เม็ดเลือดขาว (WBC Differential 100 cells)",
+		Description: "จิ้มที่รูปเซลล์ฝั่งซ้าย แล้วจิ้มชนิดเซลล์ฝั่งขวาเพื่อจำแนก จนครบทั้ง 100 เซลล์",
+		Category:    "โลหิตวิทยา",
+		Categories:  categories,
+		Cells:       cells,
+		PassPercent: 80,
+		DurationSec: 900,
+		CreatedBy:   trainer.ID,
+		CreatedAt:   time.Now(),
+	}
+	if _, err := quizzesColl.InsertOne(ctx, q); err != nil {
+		return err
+	}
+	log.Printf("🩸 seeded WBC differential quiz (%d cells)", len(cells))
+	return nil
+}
+
+// =============================================================================
+// seedCellImageAssets — อ่าน folder public/types แล้ว insert path ลง MongoDB
+//
+// ใช้ครั้งเดียว: เปิด comment ที่ Run() แล้ว restart server จากนั้น comment กลับ
+// path บน Supabase จะเป็น "{cellType}/{filename}" เช่น "neutrophil/BNE_100878.jpg"
+// =============================================================================
+
+// seedCellImageAssets สแกน publicTypesDir แล้ว insert CellImageAsset เข้า collection "cell_image_assets"
+// publicTypesDir ควรเป็น absolute path ไปยัง backend/public/types
+func seedCellImageAssets(ctx context.Context, coll *mongo.Collection, publicTypesDir string) error {
+	entries, err := os.ReadDir(publicTypesDir)
+	if err != nil {
+		return fmt.Errorf("seedCellImageAssets: cannot read dir %s: %w", publicTypesDir, err)
+	}
+
+	total := 0
+	skipped := 0
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue // ข้าม .DS_Store หรือไฟล์อื่น ๆ ที่ไม่ใช่ folder
+		}
+		cellType := entry.Name()
+		cellDir := filepath.Join(publicTypesDir, cellType)
+
+		files, err := os.ReadDir(cellDir)
+		if err != nil {
+			log.Printf("⚠️  cannot read %s: %v", cellDir, err)
+			continue
+		}
+
+		for _, f := range files {
+			if f.IsDir() {
+				continue
+			}
+			name := f.Name()
+			// กรอกเฉพาะไฟล์รูป (.jpg, .jpeg, .png)
+			ext := strings.ToLower(filepath.Ext(name))
+			if ext != ".jpg" && ext != ".jpeg" && ext != ".png" {
+				continue
+			}
+
+			path := cellType + "/" + name // path บน Supabase bucket
+
+			// ข้ามถ้ามีอยู่แล้ว (idempotent)
+			count, _ := coll.CountDocuments(ctx, bson.M{"path": path})
+			if count > 0 {
+				skipped++
+				continue
+			}
+
+			asset := models.CellImageAsset{
+				CellType:  cellType,
+				Filename:  name,
+				Path:      path,
+				CreatedAt: time.Now(),
+			}
+			if _, err := coll.InsertOne(ctx, asset); err != nil {
+				return fmt.Errorf("seedCellImageAssets: insert %s: %w", path, err)
+			}
+			total++
+		}
+	}
+
+	log.Printf("🖼️  seeded cell_image_assets: inserted=%d, skipped(already exists)=%d", total, skipped)
+	return nil
+}
