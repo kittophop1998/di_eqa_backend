@@ -45,20 +45,56 @@ func (h *QuizHandler) buildImageURL(path string) string {
 		"/storage/v1/object/public/" + h.SupabaseBucket + "/" + path
 }
 
-// List คืนรายการข้อสอบ — แสดง cellCount แทน questionCount
+// List คืนรายการข้อสอบ
+//   - admin / instructor : เห็นทุก quiz
+//   - user ทั่วไป        : เห็นเฉพาะ quiz ที่มี session สถานะ pending/running อยู่
 func (h *QuizHandler) List(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	cur, err := h.QuizColl.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}))
+	role, _ := c.Get("role")
+	userRole, _ := role.(string)
+
+	// สร้าง filter สำหรับ query quiz
+	quizFilter := bson.M{}
+
+	if userRole != models.RoleAdmin && userRole != models.RoleInstructor {
+		// ดึง quizId ที่มี active session เท่านั้น
+		activeStatuses := []string{models.SessionPending, models.SessionRunning}
+		cur, err := h.SessionColl.Find(ctx, bson.M{"status": bson.M{"$in": activeStatuses}})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		defer cur.Close(ctx)
+
+		seen := map[primitive.ObjectID]struct{}{}
+		activeQuizIDs := []primitive.ObjectID{}
+		for cur.Next(ctx) {
+			var sess models.Session
+			if err := cur.Decode(&sess); err == nil {
+				if _, exists := seen[sess.QuizID]; !exists {
+					seen[sess.QuizID] = struct{}{}
+					activeQuizIDs = append(activeQuizIDs, sess.QuizID)
+				}
+			}
+		}
+		if len(activeQuizIDs) == 0 {
+			c.JSON(http.StatusOK, []interface{}{})
+			return
+		}
+		quizFilter = bson.M{"_id": bson.M{"$in": activeQuizIDs}}
+	}
+
+	quizCur, err := h.QuizColl.Find(ctx, quizFilter, options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	defer cur.Close(ctx)
+	defer quizCur.Close(ctx)
 
 	var quizzes []models.Quiz
-	if err := cur.All(ctx, &quizzes); err != nil {
+	if err := quizCur.All(ctx, &quizzes); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -92,9 +128,29 @@ func (h *QuizHandler) Get(c *gin.Context) {
 
 	uid, _ := c.Get("userId")
 	userIDStr, _ := uid.(string)
+	role, _ := c.Get("role")
+	userRole, _ := role.(string)
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
+
+	// ถ้าส่ง ?session= มาและไม่ใช่ admin ให้ตรวจสถานะ session ว่าต้อง running
+	if sessionIDStr := c.Query("session"); sessionIDStr != "" && userRole != models.RoleAdmin {
+		sessionOID, err := primitive.ObjectIDFromHex(sessionIDStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid session id"})
+			return
+		}
+		var sess models.Session
+		if err := h.SessionColl.FindOne(ctx, bson.M{"_id": sessionOID}).Decode(&sess); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+			return
+		}
+		if sess.Status != models.SessionRunning {
+			c.JSON(http.StatusForbidden, gin.H{"error": "session has not started yet"})
+			return
+		}
+	}
 
 	// Cache ข้อมูล quiz (ไม่รวม cells ที่สุ่ม) เพื่อลด DB query
 	quizMetaKey := "quiz:meta:" + id.Hex()

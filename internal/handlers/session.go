@@ -30,7 +30,8 @@ func generateCode() string {
 }
 
 type createSessionInput struct {
-	QuizID string `json:"quizId" binding:"required"`
+	QuizID     string `json:"quizId"     binding:"required"`
+	HospitalID string `json:"hospitalId"` // admin เลือก รพ. ได้เอง; ถ้าไม่ระบุใช้ รพ. ของ host
 }
 
 func (s *SessionHandler) Create(c *gin.Context) {
@@ -48,7 +49,19 @@ func (s *SessionHandler) Create(c *gin.Context) {
 	uid, _ := c.Get("userId")
 	hid, _ := c.Get("hospitalId")
 	hostID, _ := primitive.ObjectIDFromHex(uid.(string))
-	hospID, _ := primitive.ObjectIDFromHex(hid.(string))
+
+	// ถ้า admin ระบุ hospitalId มาใน body ให้ใช้ค่านั้น; ไม่งั้น fallback ไปใช้ของ host
+	var hospID primitive.ObjectID
+	if in.HospitalID != "" {
+		parsed, err := primitive.ObjectIDFromHex(in.HospitalID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid hospital id"})
+			return
+		}
+		hospID = parsed
+	} else {
+		hospID, _ = primitive.ObjectIDFromHex(hid.(string))
+	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
