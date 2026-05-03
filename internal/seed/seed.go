@@ -42,10 +42,10 @@ func Run(db *mongo.Database, supabaseURL, supabaseBucket string) error {
 	// ── seed cell_image_assets จาก public/types (idempotent) ─────────────────
 	// ถ้า folder ว่างเปล่า (เช่น บน production server ที่ไม่มีรูปใน git)
 	// จะ fallback ไปดึง list รูปจาก Supabase Storage แทน
-	// publicTypesDir := filepath.Join(".", "public", "types")
-	// if err := seedCellImageAssets(ctx, cellImageAssetsColl, publicTypesDir, supabaseURL, supabaseBucket); err != nil {
-	// 	log.Printf("⚠️  seedCellImageAssets: %v", err)
-	// }
+	publicTypesDir := filepath.Join(".", "public", "types")
+	if err := seedCellImageAssets(ctx, cellImageAssetsColl, publicTypesDir, supabaseURL, supabaseBucket); err != nil {
+		log.Printf("⚠️  seedCellImageAssets: %v", err)
+	}
 	// ─────────────────────────────────────────────────────────────────────────
 
 	if err := seedHospitals(ctx, hospitalsColl); err != nil {
