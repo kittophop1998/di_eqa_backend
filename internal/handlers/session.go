@@ -18,9 +18,10 @@ import (
 )
 
 type SessionHandler struct {
-	SessionColl *mongo.Collection
-	QuizColl    *mongo.Collection
-	Hub         *ws.Hub
+	SessionColl  *mongo.Collection
+	QuizColl     *mongo.Collection
+	HospitalColl *mongo.Collection
+	Hub          *ws.Hub
 }
 
 func generateCode() string {
@@ -30,8 +31,9 @@ func generateCode() string {
 }
 
 type createSessionInput struct {
-	QuizID     string `json:"quizId"     binding:"required"`
-	HospitalID string `json:"hospitalId"` // admin เลือก รพ. ได้เอง; ถ้าไม่ระบุใช้ รพ. ของ host
+	QuizID       string `json:"quizId"       binding:"required"`
+	HospitalID   string `json:"hospitalId"`   // ระบุด้วย ObjectID โดยตรง
+	HospitalCode string `json:"hospitalCode"` // หรือระบุด้วย code ของ รพ. (ถ้าระบุ hospitalCode จะใช้แทน hospitalId)
 }
 
 func (s *SessionHandler) Create(c *gin.Context) {
@@ -48,23 +50,43 @@ func (s *SessionHandler) Create(c *gin.Context) {
 
 	uid, _ := c.Get("userId")
 	hid, _ := c.Get("hospitalId")
+	role, _ := c.Get("role")
 	hostID, _ := primitive.ObjectIDFromHex(uid.(string))
 
-	// ถ้า admin ระบุ hospitalId มาใน body ให้ใช้ค่านั้น; ไม่งั้น fallback ไปใช้ของ host
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	// ลำดับการกำหนด hospitalId:
+	// 1. ถ้าระบุ hospitalCode → lookup จาก collection
+	// 2. ถ้าระบุ hospitalId โดยตรง → parse ObjectID
+	// 3. fallback → ใช้ hospitalId ของ host จาก JWT (เฉพาะ user/instructor เท่านั้น)
+	//    admin ไม่มี hospitalId ใน JWT → ต้องระบุ hospitalCode เสมอ
 	var hospID primitive.ObjectID
-	if in.HospitalID != "" {
+	switch {
+	case in.HospitalCode != "":
+		var hosp models.Hospital
+		if err := s.HospitalColl.FindOne(ctx,
+			bson.M{"code": strings.ToUpper(strings.TrimSpace(in.HospitalCode))},
+		).Decode(&hosp); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "hospital not found for code: " + in.HospitalCode})
+			return
+		}
+		hospID = hosp.ID
+	case in.HospitalID != "":
 		parsed, err := primitive.ObjectIDFromHex(in.HospitalID)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid hospital id"})
 			return
 		}
 		hospID = parsed
-	} else {
+	default:
+		// admin ไม่มี hospitalId → บังคับระบุ hospitalCode
+		if r, _ := role.(string); r == models.RoleAdmin {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "admin ต้องระบุ hospitalCode เพื่อสร้างเซสชัน"})
+			return
+		}
 		hospID, _ = primitive.ObjectIDFromHex(hid.(string))
 	}
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
-	defer cancel()
 
 	if err := s.QuizColl.FindOne(ctx, bson.M{"_id": quizID}).Err(); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "quiz not found"})
@@ -197,16 +219,19 @@ func (s *SessionHandler) ListActive(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	// กรอง session ตาม hospitalId ของ user ที่ request
 	hid, _ := c.Get("hospitalId")
+	role, _ := c.Get("role")
 
 	filter := bson.M{"status": bson.M{"$in": []string{models.SessionPending, models.SessionRunning}}}
 
-	// admin/instructor เห็นทุก session ของ รพ. ตัวเอง, user ทั่วไปก็เห็นของ รพ. ตัวเองเช่นกัน
-	if hidStr, ok := hid.(string); ok && hidStr != "" {
-		hospID, err := primitive.ObjectIDFromHex(hidStr)
-		if err == nil {
-			filter["hospitalId"] = hospID
+	// admin เห็นทุก session (ไม่ filter ตาม hospital)
+	// user / instructor เห็นเฉพาะ session ของ รพ. ตัวเอง
+	if r, _ := role.(string); r != models.RoleAdmin {
+		if hidStr, ok := hid.(string); ok && hidStr != "" {
+			hospID, err := primitive.ObjectIDFromHex(hidStr)
+			if err == nil {
+				filter["hospitalId"] = hospID
+			}
 		}
 	}
 

@@ -1,4 +1,4 @@
-package models
+package entity
 
 import (
 	"time"
@@ -16,11 +16,11 @@ type User struct {
 	ID         primitive.ObjectID `bson:"_id,omitempty"        json:"id"`
 	HospitalID primitive.ObjectID `bson:"hospitalId,omitempty" json:"hospitalId,omitempty"`
 	Username   string             `bson:"username"             json:"username"`
-	FullName   string             `bson:"fullName" json:"fullName"`
-	Email      string             `bson:"email" json:"email"`
-	Password   string             `bson:"password" json:"-"`
-	Role       string             `bson:"role" json:"role"`
-	CreatedAt  time.Time          `bson:"createdAt" json:"createdAt"`
+	FullName   string             `bson:"fullName"             json:"fullName"`
+	Email      string             `bson:"email"                json:"email"`
+	Password   string             `bson:"password"             json:"-"`
+	Role       string             `bson:"role"                 json:"role"`
+	CreatedAt  time.Time          `bson:"createdAt"            json:"createdAt"`
 }
 
 type PublicUser struct {

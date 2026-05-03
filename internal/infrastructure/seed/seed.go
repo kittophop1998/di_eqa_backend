@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/di-eqa/backend/internal/models"
+	"github.com/di-eqa/backend/internal/domain/entity"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -63,7 +63,7 @@ func Run(db *mongo.Database, supabaseURL, supabaseBucket string) error {
 }
 
 func seedHospitals(ctx context.Context, coll *mongo.Collection) error {
-	hospitals := []models.Hospital{
+	hospitals := []entity.Hospital{
 		{Code: "HOSP001", Name: "โรงพยาบาลศิริราช", Province: "กรุงเทพมหานคร", Logo: "🏥"},
 		{Code: "HOSP002", Name: "โรงพยาบาลจุฬาลงกรณ์ สภากาชาดไทย", Province: "กรุงเทพมหานคร", Logo: "🏥"},
 		{Code: "HOSP003", Name: "โรงพยาบาลรามาธิบดี", Province: "กรุงเทพมหานคร", Logo: "🏥"},
@@ -88,25 +88,25 @@ func seedHospitals(ctx context.Context, coll *mongo.Collection) error {
 }
 
 func seedUsers(ctx context.Context, usersColl, hospitalsColl *mongo.Collection) error {
-	var siriraj models.Hospital
+	var siriraj entity.Hospital
 	if err := hospitalsColl.FindOne(ctx, bson.M{"code": "HOSP001"}).Decode(&siriraj); err != nil {
 		return err
 	}
 
 	// ── seed admin (ไม่ผูกกับ รพ. ใด) ────────────────────────────────────────
-	adminCount, err := usersColl.CountDocuments(ctx, bson.M{"username": "admin", "role": models.RoleAdmin})
+	adminCount, err := usersColl.CountDocuments(ctx, bson.M{"username": "admin", "role": entity.RoleAdmin})
 	if err != nil {
 		return err
 	}
 	if adminCount == 0 {
 		hash, _ := bcrypt.GenerateFromPassword([]byte("admin1234"), bcrypt.DefaultCost)
-		adminUser := models.User{
+		adminUser := entity.User{
 			// HospitalID ไม่ set → zero ObjectID → omitempty จะไม่ถูก store
 			Username:  "admin",
 			FullName:  "ผู้ดูแลระบบ",
 			Email:     "admin@di-eqa.local",
 			Password:  string(hash),
-			Role:      models.RoleAdmin,
+			Role:      entity.RoleAdmin,
 			CreatedAt: time.Now(),
 		}
 		if _, err := usersColl.InsertOne(ctx, adminUser); err != nil {
@@ -122,9 +122,9 @@ func seedUsers(ctx context.Context, usersColl, hospitalsColl *mongo.Collection) 
 		Password string
 		Role     string
 	}{
-		{"trainer", "วิทยากรอบรม", "trainer1234", models.RoleInstructor},
-		{"trainee01", "ผู้เข้าอบรม คนที่ 1", "trainee1234", models.RoleUser},
-		{"trainee02", "ผู้เข้าอบรม คนที่ 2", "trainee1234", models.RoleUser},
+		{"trainer", "วิทยากรอบรม", "trainer1234", entity.RoleInstructor},
+		{"trainee01", "ผู้เข้าอบรม คนที่ 1", "trainee1234", entity.RoleUser},
+		{"trainee02", "ผู้เข้าอบรม คนที่ 2", "trainee1234", entity.RoleUser},
 	}
 
 	for _, u := range hospitalUsers {
@@ -136,7 +136,7 @@ func seedUsers(ctx context.Context, usersColl, hospitalsColl *mongo.Collection) 
 			continue
 		}
 		hash, _ := bcrypt.GenerateFromPassword([]byte(u.Password), bcrypt.DefaultCost)
-		user := models.User{
+		user := entity.User{
 			HospitalID: siriraj.ID,
 			Username:   u.Username,
 			FullName:   u.FullName,
@@ -174,11 +174,11 @@ func seedQuizzes(ctx context.Context, quizzesColl, submissionsColl, usersColl, a
 		return nil
 	}
 
-	var trainer models.User
+	var trainer entity.User
 	_ = usersColl.FindOne(ctx, bson.M{"username": "trainer"}).Decode(&trainer)
 
 	// 4 ชนิดเซลล์เม็ดเลือดขาวที่พบบ่อย — สีของ chip จะใช้ฝั่ง UI
-	categories := []models.CellCategory{
+	categories := []entity.CellCategory{
 		{Key: "neutrophil", Label: "Neutrophil", Color: "#7c3aed"},
 		{Key: "lymphocyte", Label: "Lymphocyte", Color: "#2563eb"},
 		{Key: "eosinophil", Label: "Eosinophil", Color: "#ea580c"},
@@ -197,7 +197,7 @@ func seedQuizzes(ctx context.Context, quizzesColl, submissionsColl, usersColl, a
 		{"eosinophil", 5},
 	}
 
-	cells := make([]models.CellImage, 0, 100)
+	cells := make([]entity.CellImage, 0, 100)
 	rng := rand.New(rand.NewSource(42))
 
 	// ── ดึงรูปจาก cell_image_assets ────────────────────────────────────────
@@ -235,7 +235,7 @@ func seedQuizzes(ctx context.Context, quizzesColl, submissionsColl, usersColl, a
 		for i := 0; i < p.count; i++ {
 			idx++
 			a := typeAssets[i%len(typeAssets)] // cycle ถ้าไม่พอ
-			cells = append(cells, models.CellImage{
+			cells = append(cells, entity.CellImage{
 				ID:          fmt.Sprintf("c%03d", idx),
 				AssetID:     a.ID,
 				Path:        a.Path, // เก็บแค่ relative path — handler จะสร้าง full URL เอง
@@ -246,7 +246,7 @@ func seedQuizzes(ctx context.Context, quizzesColl, submissionsColl, usersColl, a
 	// shuffle เพื่อให้เซลล์แต่ละชนิดกระจายไม่เรียงเป็นกอง ๆ
 	rng.Shuffle(len(cells), func(i, j int) { cells[i], cells[j] = cells[j], cells[i] })
 
-	q := models.Quiz{
+	q := entity.Quiz{
 		Title:       "DI EQA — นับแยกชนิดเซลล์เม็ดเลือดขาว (WBC Differential 100 cells)",
 		Description: "จิ้มที่รูปเซลล์ฝั่งซ้าย แล้วจิ้มชนิดเซลล์ฝั่งขวาเพื่อจำแนก จนครบทั้ง 100 เซลล์",
 		Category:    "โลหิตวิทยา",
@@ -346,7 +346,7 @@ func seedFromLocalFS(ctx context.Context, coll *mongo.Collection, publicTypesDir
 				continue
 			}
 
-			batch = append(batch, models.CellImageAsset{
+			batch = append(batch, entity.CellImageAsset{
 				CellType:  cellType,
 				Filename:  name,
 				Path:      path,
@@ -421,7 +421,7 @@ func seedFromSupabase(ctx context.Context, coll *mongo.Collection, supabaseURL, 
 				continue
 			}
 
-			batch = append(batch, models.CellImageAsset{
+			batch = append(batch, entity.CellImageAsset{
 				CellType:  cellType,
 				Filename:  name,
 				Path:      path,

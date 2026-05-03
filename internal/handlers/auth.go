@@ -99,9 +99,10 @@ func (a *AuthHandler) Register(c *gin.Context) {
 }
 
 type loginInput struct {
-	HospitalCode string `json:"hospitalCode" binding:"required"`
+	HospitalCode string `json:"hospitalCode"`
 	Username     string `json:"username" binding:"required"`
 	Password     string `json:"password" binding:"required"`
+	IsAdmin      bool   `json:"isAdmin"`
 }
 
 func (a *AuthHandler) Login(c *gin.Context) {
@@ -113,6 +114,39 @@ func (a *AuthHandler) Login(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
 	defer cancel()
 
+	username := strings.ToLower(strings.TrimSpace(in.Username))
+
+	// ---- Admin login: ไม่ต้องใช้ HospitalCode ----
+	if in.IsAdmin || in.HospitalCode == "" {
+		var user models.User
+		if err := a.UsersColl.FindOne(ctx, bson.M{
+			"username": username,
+			"role":     models.RoleAdmin,
+		}).Decode(&user); err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"})
+			return
+		}
+
+		if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(in.Password)); err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "รหัสผ่านไม่ถูกต้อง"})
+			return
+		}
+
+		// admin ไม่มี hospitalId → ส่ง "" เข้า JWT (role=admin ไม่ต้องอิง รพ.)
+		token, err := utils.GenerateToken(a.Cfg.JWTSecret, user.ID.Hex(), "", user.Role, a.Cfg.JWTExpiry)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"token": token,
+			"user":  user.ToPublic(nil),
+		})
+		return
+	}
+
+	// ---- User / Instructor login: ต้องใช้ HospitalCode ----
 	var hospital models.Hospital
 	if err := a.HospitalColl.FindOne(ctx, bson.M{"code": strings.ToUpper(in.HospitalCode)}).Decode(&hospital); err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "รหัสโรงพยาบาล หรือชื่อผู้ใช้ไม่ถูกต้อง"})
@@ -122,7 +156,7 @@ func (a *AuthHandler) Login(c *gin.Context) {
 	var user models.User
 	if err := a.UsersColl.FindOne(ctx, bson.M{
 		"hospitalId": hospital.ID,
-		"username":   strings.ToLower(strings.TrimSpace(in.Username)),
+		"username":   username,
 	}).Decode(&user); err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "รหัสโรงพยาบาล หรือชื่อผู้ใช้ไม่ถูกต้อง"})
 		return
