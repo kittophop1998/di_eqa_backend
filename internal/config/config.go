@@ -15,7 +15,7 @@ type Config struct {
 	JWTExpiry      time.Duration
 	AllowedOrigin  string
 	SupabaseURL    string // base URL ของ Supabase project เช่น https://xxxx.supabase.co
-	SupabaseBucket string // ชื่อ Storage bucket เช่น "cell-images"
+	SupabaseBucket string // ชื่อ Storage bucket เช่น "images_eqa"
 }
 
 func Load() *Config {
@@ -28,8 +28,8 @@ func Load() *Config {
 		JWTSecret:      getEnv("JWT_SECRET", "change-me-in-production-please-this-is-a-dev-secret"),
 		JWTExpiry:      12 * time.Hour,
 		AllowedOrigin:  getEnv("ALLOWED_ORIGIN", "*"),
-		SupabaseURL:    getEnv("SUPABASE_URL", ""),
-		SupabaseBucket: getEnv("SUPABASE_BUCKET", "cell-images"),
+		SupabaseURL:    getEnv("SUPABASE_URL", "https://wcrrkhgfaxfcxegotpef.supabase.co"),
+		SupabaseBucket: getEnv("SUPABASE_BUCKET", "images_eqa"),
 	}
 }
 

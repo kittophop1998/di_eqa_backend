@@ -35,10 +35,10 @@ func Run(db *mongo.Database, supabaseURL, supabaseBucket string) error {
 	})
 
 	// ── seed cell_image_assets จาก public/types (idempotent) ─────────────────
-	// publicTypesDir := filepath.Join(".", "public", "types")
-	// if err := seedCellImageAssets(ctx, cellImageAssetsColl, publicTypesDir); err != nil {
-	// 	log.Printf("⚠️  seedCellImageAssets: %v", err)
-	// }
+	publicTypesDir := filepath.Join(".", "public", "types")
+	if err := seedCellImageAssets(ctx, cellImageAssetsColl, publicTypesDir); err != nil {
+		log.Printf("⚠️  seedCellImageAssets: %v", err)
+	}
 	// ─────────────────────────────────────────────────────────────────────────
 
 	if err := seedHospitals(ctx, hospitalsColl); err != nil {
@@ -126,8 +126,8 @@ func seedUsers(ctx context.Context, usersColl, hospitalsColl *mongo.Collection) 
 
 // seedQuizzes สร้างข้อสอบ DI EQA แบบ "Cell Classification" (100 เซลล์)
 // ถ้าเจอข้อสอบสคีมาเก่า (ไม่มี field cells) จะลบทิ้งแล้วเริ่มใหม่
-// รูปเซลล์จะดึงจาก collection cell_image_assets (ที่ seed ไว้จาก public/types)
-// ถ้ายังไม่มี assets ใน DB จะ fallback เป็น SVG data URI แบบเดิม
+// รูปเซลล์ดึงจาก collection cell_image_assets เท่านั้น — ไม่มี SVG fallback
+// ImageURL ไม่ถูกเก็บใน quiz document แต่จะสร้าง dynamic ตอน handler ตอบ request
 func seedQuizzes(ctx context.Context, quizzesColl, submissionsColl, usersColl, assetsColl *mongo.Collection, supabaseURL, supabaseBucket string) error {
 	// ลบข้อสอบเก่าที่ยังเป็น schema multiple-choice (ไม่มี field "cells")
 	delRes, _ := quizzesColl.DeleteMany(ctx, bson.M{"cells": bson.M{"$exists": false}})
@@ -188,49 +188,30 @@ func seedQuizzes(ctx context.Context, quizzesColl, submissionsColl, usersColl, a
 		}
 	}
 
-	// สร้าง public URL จาก Supabase path
-	buildImageURL := func(path string) string {
-		if supabaseURL == "" {
-			return ""
-		}
-		return strings.TrimRight(supabaseURL, "/") +
-			"/storage/v1/object/public/" + supabaseBucket + "/" + path
-	}
-
-	useRealImages := len(assetsByType) > 0 && supabaseURL != ""
-	if !useRealImages {
-		log.Printf("⚠️  cell_image_assets ไม่พบ หรือ SUPABASE_URL ว่างเปล่า — ใช้ SVG fallback")
+	if len(assetsByType) == 0 {
+		log.Printf("⚠️  cell_image_assets ว่างเปล่า — ข้าม quiz seed (รัน seedCellImageAssets ก่อน แล้ว restart)")
+		return nil
 	}
 
 	idx := 0
 	for _, p := range plan {
 		typeAssets := assetsByType[p.kind]
-		// shuffle assets ของแต่ละ type เพื่อสุ่มเลือก
+		if len(typeAssets) == 0 {
+			log.Printf("⚠️  ไม่มี asset สำหรับ %s — ข้ามเซลล์ชนิดนี้ %d ใบ", p.kind, p.count)
+			continue
+		}
+		// shuffle แล้ว cycle ถ้า asset มีน้อยกว่าจำนวนที่ต้องการ
 		rng.Shuffle(len(typeAssets), func(i, j int) { typeAssets[i], typeAssets[j] = typeAssets[j], typeAssets[i] })
 
 		for i := 0; i < p.count; i++ {
 			idx++
-			cellID := fmt.Sprintf("c%03d", idx)
-
-			var cell models.CellImage
-			if useRealImages && i < len(typeAssets) {
-				a := typeAssets[i]
-				cell = models.CellImage{
-					ID:          cellID,
-					AssetID:     a.ID,
-					ImageURL:    buildImageURL(a.Path),
-					CorrectType: p.kind,
-				}
-			} else {
-				// fallback: generate SVG
-				svg := renderCellSVG(p.kind, int64(idx)*131+rng.Int63n(1000))
-				cell = models.CellImage{
-					ID:          cellID,
-					ImageURL:    svgToDataURI(svg),
-					CorrectType: p.kind,
-				}
-			}
-			cells = append(cells, cell)
+			a := typeAssets[i%len(typeAssets)] // cycle ถ้าไม่พอ
+			cells = append(cells, models.CellImage{
+				ID:          fmt.Sprintf("c%03d", idx),
+				AssetID:     a.ID,
+				Path:        a.Path, // เก็บแค่ relative path — handler จะสร้าง full URL เอง
+				CorrectType: p.kind,
+			})
 		}
 	}
 	// shuffle เพื่อให้เซลล์แต่ละชนิดกระจายไม่เรียงเป็นกอง ๆ

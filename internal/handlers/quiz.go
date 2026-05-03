@@ -32,6 +32,17 @@ type QuizHandler struct {
 	SessionColl    *mongo.Collection
 	Redis          *redis.Client
 	Hub            *ws.Hub
+	SupabaseURL    string // base URL เช่น https://xxxx.supabase.co
+	SupabaseBucket string // ชื่อ bucket เช่น "cell-images"
+}
+
+// buildImageURL สร้าง public URL จาก relative path บน Supabase
+func (h *QuizHandler) buildImageURL(path string) string {
+	if h.SupabaseURL == "" || path == "" {
+		return ""
+	}
+	return strings.TrimRight(h.SupabaseURL, "/") +
+		"/storage/v1/object/public/" + h.SupabaseBucket + "/" + path
 }
 
 // List คืนรายการข้อสอบ — แสดง cellCount แทน questionCount
@@ -126,10 +137,13 @@ func (h *QuizHandler) Get(c *gin.Context) {
 		}
 	}
 
-	// ตัด CorrectType ออกก่อนส่ง client
+	// ตัด CorrectType ออกก่อนส่ง client และ inject ImageURL จาก Path
 	publicCells := make([]models.CellImage, len(cells))
 	for i, cell := range cells {
-		publicCells[i] = models.CellImage{ID: cell.ID, ImageURL: cell.ImageURL}
+		publicCells[i] = models.CellImage{
+			ID:       cell.ID,
+			ImageURL: h.buildImageURL(cell.Path),
+		}
 	}
 
 	publicQuiz := struct {

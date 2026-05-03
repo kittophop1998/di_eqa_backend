@@ -100,6 +100,8 @@ func buildDeps(
 			SessionColl:    colls.sessions,
 			Redis:          redisClient,
 			Hub:            hub,
+			SupabaseURL:    cfg.SupabaseURL,
+			SupabaseBucket: cfg.SupabaseBucket,
 		},
 		SessionHandler: &handlers.SessionHandler{
 			SessionColl: colls.sessions,

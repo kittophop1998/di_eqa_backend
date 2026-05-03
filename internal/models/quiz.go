@@ -16,11 +16,13 @@ type CellCategory struct {
 
 // CellImage คือรูปเซลล์ 1 ใบในข้อสอบ — ผู้ใช้ต้องบอกว่าเซลล์นี้เป็นชนิดอะไร
 // AssetID อ้างอิง _id ใน collection cell_image_assets
-// ImageURL คือ public URL เต็มของรูป (สร้างจาก SupabaseURL + bucket + path)
+// Path คือ relative path บน Supabase bucket เช่น "neutrophil/BNE_100878.jpg"
+// ImageURL ไม่เก็บลง MongoDB — สร้างจาก SupabaseURL + bucket + Path ตอน request เข้ามา
 type CellImage struct {
 	ID          string             `bson:"id" json:"id"`
 	AssetID     primitive.ObjectID `bson:"assetId,omitempty" json:"assetId,omitempty"`
-	ImageURL    string             `bson:"imageUrl" json:"imageUrl"`
+	Path        string             `bson:"path,omitempty" json:"path,omitempty"` // relative path on Supabase
+	ImageURL    string             `bson:"-" json:"imageUrl,omitempty"`          // computed at query time, never stored
 	CorrectType string             `bson:"correctType" json:"correctType,omitempty"`
 }
 
@@ -52,6 +54,7 @@ type CellImageAsset struct {
 
 // PublicCells คืน slice ที่ตัด CorrectType ออก ใช้ส่งให้ฝั่ง client
 // เพื่อกันการเฉลยเซลล์รั่วผ่าน DevTools
+// ImageURL ต้องถูก inject ไว้ก่อน (โดย handler) ก่อนเรียก method นี้
 func (q *Quiz) PublicCells() []CellImage {
 	out := make([]CellImage, len(q.Cells))
 	for i, c := range q.Cells {
