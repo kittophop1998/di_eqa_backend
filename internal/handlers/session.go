@@ -211,7 +211,7 @@ func (s *SessionHandler) ListActive(c *gin.Context) {
 	}
 
 	cur, err := s.SessionColl.Find(ctx,
-		bson.M{"status": bson.M{"$in": []string{models.SessionPending, models.SessionRunning}}},
+		filter,
 		options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}).SetLimit(50),
 	)
 	if err != nil {
