@@ -2,9 +2,12 @@ package seed
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,8 +38,10 @@ func Run(db *mongo.Database, supabaseURL, supabaseBucket string) error {
 	})
 
 	// ── seed cell_image_assets จาก public/types (idempotent) ─────────────────
+	// ถ้า folder ว่างเปล่า (เช่น บน production server ที่ไม่มีรูปใน git)
+	// จะ fallback ไปดึง list รูปจาก Supabase Storage แทน
 	publicTypesDir := filepath.Join(".", "public", "types")
-	if err := seedCellImageAssets(ctx, cellImageAssetsColl, publicTypesDir); err != nil {
+	if err := seedCellImageAssets(ctx, cellImageAssetsColl, publicTypesDir, supabaseURL, supabaseBucket); err != nil {
 		log.Printf("⚠️  seedCellImageAssets: %v", err)
 	}
 	// ─────────────────────────────────────────────────────────────────────────
@@ -238,16 +243,44 @@ func seedQuizzes(ctx context.Context, quizzesColl, submissionsColl, usersColl, a
 // =============================================================================
 // seedCellImageAssets — อ่าน folder public/types แล้ว insert path ลง MongoDB
 //
-// ใช้ครั้งเดียว: เปิด comment ที่ Run() แล้ว restart server จากนั้น comment กลับ
-// path บน Supabase จะเป็น "{cellType}/{filename}" เช่น "neutrophil/BNE_100878.jpg"
+// - ถ้ามีรูปใน publicTypesDir (dev / Docker ที่ COPY รูปมาด้วย) → อ่านจาก filesystem
+// - ถ้า folder ว่างเปล่า (production server ที่ git ไม่มีรูป เพราะ public/ gitignored)
+//   → fallback ไปดึง list object จาก Supabase Storage REST API แทน
+// path ที่เก็บใน MongoDB จะเป็น "{cellType}/{filename}" เช่น "neutrophil/BNE_100878.jpg"
 // =============================================================================
 
+// knownCellTypes คือชื่อ folder ที่รู้จัก ใช้ตอน parse path จาก Supabase
+var knownCellTypes = []string{"neutrophil", "lymphocyte", "eosinophil", "monocyte", "basophil", "erythroblast"}
+
 // seedCellImageAssets สแกน publicTypesDir แล้ว insert CellImageAsset เข้า collection "cell_image_assets"
-// publicTypesDir ควรเป็น absolute path ไปยัง backend/public/types
-func seedCellImageAssets(ctx context.Context, coll *mongo.Collection, publicTypesDir string) error {
+// ถ้า local dir ว่างเปล่าจะ fallback ไปใช้ Supabase Storage API (supabaseURL + supabaseBucket)
+func seedCellImageAssets(ctx context.Context, coll *mongo.Collection, publicTypesDir, supabaseURL, supabaseBucket string) error {
+	total, skipped, err := seedFromLocalFS(ctx, coll, publicTypesDir)
+	if err != nil {
+		log.Printf("⚠️  seedCellImageAssets local: %v — trying Supabase fallback", err)
+	}
+	if total+skipped > 0 {
+		// มีข้อมูลจาก local filesystem แล้ว ไม่ต้อง fallback
+		log.Printf("🖼️  seeded cell_image_assets (local): inserted=%d, skipped=%d", total, skipped)
+		return nil
+	}
+
+	// Fallback: ดึง list จาก Supabase Storage
+	log.Printf("📡 local public/types ว่างเปล่า — fallback ไปดึงรายการรูปจาก Supabase Storage...")
+	total, skipped, err = seedFromSupabase(ctx, coll, supabaseURL, supabaseBucket)
+	if err != nil {
+		return fmt.Errorf("seedCellImageAssets supabase fallback: %w", err)
+	}
+	log.Printf("🖼️  seeded cell_image_assets (supabase): inserted=%d, skipped=%d", total, skipped)
+	return nil
+}
+
+// seedFromLocalFS อ่านรูปจาก filesystem แล้ว insert ลง MongoDB
+// คืน (inserted, skipped, error)
+func seedFromLocalFS(ctx context.Context, coll *mongo.Collection, publicTypesDir string) (int, int, error) {
 	entries, err := os.ReadDir(publicTypesDir)
 	if err != nil {
-		return fmt.Errorf("seedCellImageAssets: cannot read dir %s: %w", publicTypesDir, err)
+		return 0, 0, fmt.Errorf("cannot read dir %s: %w", publicTypesDir, err)
 	}
 
 	total := 0
@@ -255,7 +288,7 @@ func seedCellImageAssets(ctx context.Context, coll *mongo.Collection, publicType
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
-			continue // ข้าม .DS_Store หรือไฟล์อื่น ๆ ที่ไม่ใช่ folder
+			continue
 		}
 		cellType := entry.Name()
 		cellDir := filepath.Join(publicTypesDir, cellType)
@@ -271,15 +304,13 @@ func seedCellImageAssets(ctx context.Context, coll *mongo.Collection, publicType
 				continue
 			}
 			name := f.Name()
-			// กรอกเฉพาะไฟล์รูป (.jpg, .jpeg, .png)
 			ext := strings.ToLower(filepath.Ext(name))
 			if ext != ".jpg" && ext != ".jpeg" && ext != ".png" {
 				continue
 			}
 
-			path := cellType + "/" + name // path บน Supabase bucket
+			path := cellType + "/" + name
 
-			// ข้ามถ้ามีอยู่แล้ว (idempotent)
 			count, _ := coll.CountDocuments(ctx, bson.M{"path": path})
 			if count > 0 {
 				skipped++
@@ -293,12 +324,79 @@ func seedCellImageAssets(ctx context.Context, coll *mongo.Collection, publicType
 				CreatedAt: time.Now(),
 			}
 			if _, err := coll.InsertOne(ctx, asset); err != nil {
-				return fmt.Errorf("seedCellImageAssets: insert %s: %w", path, err)
+				return total, skipped, fmt.Errorf("insert %s: %w", path, err)
 			}
 			total++
 		}
 	}
+	return total, skipped, nil
+}
 
-	log.Printf("🖼️  seeded cell_image_assets: inserted=%d, skipped(already exists)=%d", total, skipped)
-	return nil
+// seedFromSupabase ดึง list object จาก Supabase Storage REST API แล้ว insert ลง MongoDB
+// ใช้ตอนที่ local public/types ว่างเปล่า (production deployment ที่ images ไม่ได้อยู่ใน git)
+func seedFromSupabase(ctx context.Context, coll *mongo.Collection, supabaseURL, bucket string) (int, int, error) {
+	total := 0
+	skipped := 0
+
+	for _, cellType := range knownCellTypes {
+		// Supabase Storage List API: POST /storage/v1/object/list/{bucket}
+		listURL := fmt.Sprintf("%s/storage/v1/object/list/%s", strings.TrimRight(supabaseURL, "/"), bucket)
+		body := fmt.Sprintf(`{"prefix":"%s/","limit":10000}`, cellType)
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, listURL, strings.NewReader(body))
+		if err != nil {
+			log.Printf("⚠️  supabase list request %s: %v", cellType, err)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Printf("⚠️  supabase list %s: %v", cellType, err)
+			continue
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("⚠️  supabase list %s: status %d", cellType, resp.StatusCode)
+			continue
+		}
+
+		var items []struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(respBody, &items); err != nil {
+			log.Printf("⚠️  supabase list %s parse: %v", cellType, err)
+			continue
+		}
+
+		for _, item := range items {
+			name := item.Name
+			ext := strings.ToLower(filepath.Ext(name))
+			if ext != ".jpg" && ext != ".jpeg" && ext != ".png" {
+				continue
+			}
+
+			path := cellType + "/" + name
+
+			count, _ := coll.CountDocuments(ctx, bson.M{"path": path})
+			if count > 0 {
+				skipped++
+				continue
+			}
+
+			asset := models.CellImageAsset{
+				CellType:  cellType,
+				Filename:  name,
+				Path:      path,
+				CreatedAt: time.Now(),
+			}
+			if _, err := coll.InsertOne(ctx, asset); err != nil {
+				return total, skipped, fmt.Errorf("insert %s: %w", path, err)
+			}
+			total++
+		}
+	}
+	return total, skipped, nil
 }
