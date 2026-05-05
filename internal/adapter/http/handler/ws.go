@@ -63,5 +63,3 @@ func (h *WSHandler) Handle(c *gin.Context) {
 	go client.WritePump()
 	go client.ReadPump()
 }
-
-

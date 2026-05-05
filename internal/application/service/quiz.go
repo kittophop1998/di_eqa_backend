@@ -19,13 +19,13 @@ const quizCellCount = 20
 
 // QuizService handles quiz, submission and leaderboard use cases.
 type QuizService struct {
-	quizzes     port.QuizRepository
-	sessions    port.SessionRepository
-	submissions port.SubmissionRepository
-	users       port.UserRepository
-	hospitals   port.HospitalRepository
-	cache       port.CachePort
-	events      port.EventPort
+	quizzes        port.QuizRepository
+	sessions       port.SessionRepository
+	submissions    port.SubmissionRepository
+	users          port.UserRepository
+	hospitals      port.HospitalRepository
+	cache          port.CachePort
+	events         port.EventPort
 	supabaseURL    string
 	supabaseBucket string
 }
@@ -119,14 +119,14 @@ func (s *QuizService) List(ctx context.Context, role, hospitalIDHex string) ([]Q
 
 // QuizGetOutput is the DTO returned by Get.
 type QuizGetOutput struct {
-	ID          primitive.ObjectID     `json:"id"`
-	Title       string                 `json:"title"`
-	Description string                 `json:"description"`
-	Category    string                 `json:"category"`
-	PassPercent int                    `json:"passPercent"`
-	DurationSec int                    `json:"durationSec"`
-	Categories  []entity.CellCategory  `json:"categories"`
-	Cells       []entity.CellImage     `json:"cells"`
+	ID          primitive.ObjectID    `json:"id"`
+	Title       string                `json:"title"`
+	Description string                `json:"description"`
+	Category    string                `json:"category"`
+	PassPercent int                   `json:"passPercent"`
+	DurationSec int                   `json:"durationSec"`
+	Categories  []entity.CellCategory `json:"categories"`
+	Cells       []entity.CellImage    `json:"cells"`
 }
 
 func (s *QuizService) Get(ctx context.Context, quizIDHex, userIDHex, sessionIDHex, role, hospitalIDHex string) (*QuizGetOutput, error) {
