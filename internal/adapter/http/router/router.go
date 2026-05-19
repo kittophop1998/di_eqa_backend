@@ -20,6 +20,8 @@ type Deps struct {
 	QuizHandler    *handler.QuizHandler
 	SessionHandler *handler.SessionHandler
 	WSHandler      *handler.WSHandler
+	UserHandler    *handler.UserHandler
+	AuditHandler   *handler.AuditHandler
 }
 
 // Setup registers all middleware and route groups on the provided *gin.Engine.
@@ -61,12 +63,19 @@ func Setup(r *gin.Engine, d Deps) *gin.Engine {
 	authed.GET("/sessions/:id/leaderboard", d.QuizHandler.Leaderboard)
 	authed.GET("/ws", d.WSHandler.Handle)
 
-	// Instructor / Admin only routes
-	instructor := authed.Group("")
-	instructor.Use(middleware.RequireRole("instructor", "admin"))
-	instructor.POST("/sessions", d.SessionHandler.Create)
-	instructor.POST("/sessions/:id/start", d.SessionHandler.Start)
-	instructor.POST("/sessions/:id/end", d.SessionHandler.End)
+	// Admin + super_admin routes (session management)
+	adminGroup := authed.Group("")
+	adminGroup.Use(middleware.RequireRole("instructor", "admin", "super_admin"))
+	adminGroup.POST("/sessions", d.SessionHandler.Create)
+	adminGroup.POST("/sessions/:id/start", d.SessionHandler.Start)
+	adminGroup.POST("/sessions/:id/end", d.SessionHandler.End)
+
+	// Super-admin only routes (user management + audit log)
+	superAdmin := authed.Group("")
+	superAdmin.Use(middleware.RequireRole("super_admin"))
+	superAdmin.GET("/users", d.UserHandler.List)
+	superAdmin.PATCH("/users/:id/role", d.UserHandler.UpdateRole)
+	superAdmin.GET("/audit-logs", d.AuditHandler.List)
 
 	return r
 }

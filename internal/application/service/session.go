@@ -67,7 +67,7 @@ func (s *SessionService) Create(ctx context.Context, in CreateSessionInput) (*en
 		}
 		hospID = parsed
 	default:
-		if in.Role == entity.RoleAdmin {
+		if in.Role == entity.RoleAdmin || in.Role == entity.RoleSuperAdmin {
 			return nil, errBadRequest("admin must provide hospitalCode")
 		}
 		hospID, _ = parseOID(in.CallerHospID)

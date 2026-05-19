@@ -13,10 +13,16 @@ import (
 // UserRepository — port for user persistence
 type UserRepository interface {
 	FindByID(ctx context.Context, id primitive.ObjectID) (*entity.User, error)
+	FindByUsername(ctx context.Context, username string) (*entity.User, error)
 	FindAdminByUsername(ctx context.Context, username string) (*entity.User, error)
 	FindByUsernameAndHospital(ctx context.Context, username string, hospitalID primitive.ObjectID) (*entity.User, error)
+	FindExternalByUsername(ctx context.Context, username string) (*entity.User, error)
+	CountByUsername(ctx context.Context, username string) (int64, error)
 	CountByUsernameAndHospital(ctx context.Context, username string, hospitalID primitive.ObjectID) (int64, error)
+	CountExternalByUsername(ctx context.Context, username string) (int64, error)
 	Create(ctx context.Context, user *entity.User) (primitive.ObjectID, error)
+	ListAll(ctx context.Context, search string, skip, limit int64) ([]entity.User, int64, error)
+	UpdateRole(ctx context.Context, id primitive.ObjectID, role string) error
 }
 
 // HospitalRepository — port for hospital persistence
@@ -50,4 +56,12 @@ type SubmissionRepository interface {
 	FindByID(ctx context.Context, id primitive.ObjectID) (*entity.Submission, error)
 	FindByIDAndUser(ctx context.Context, id, userID primitive.ObjectID) (*entity.Submission, error)
 	FindByUser(ctx context.Context, userID primitive.ObjectID, limit int64) ([]entity.Submission, error)
+}
+
+// AuditLogRepository — port for append-only audit log persistence.
+// The repository is intentionally minimal: log writes must never block the
+// hot path, so callers are expected to invoke Create from a goroutine.
+type AuditLogRepository interface {
+	Create(ctx context.Context, log *entity.AuditLog) (primitive.ObjectID, error)
+	List(ctx context.Context, action string, skip, limit int64) ([]entity.AuditLog, int64, error)
 }

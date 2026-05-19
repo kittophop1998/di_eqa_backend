@@ -17,12 +17,41 @@ func NewAuthHandler(svc *service.AuthService) *AuthHandler {
 	return &AuthHandler{svc: svc}
 }
 
+// addressInput is the JSON payload for the delivery address fields.
+type addressInput struct {
+	AddressNo   string `json:"addressNo"`
+	Building    string `json:"building"`
+	SubDistrict string `json:"subDistrict"`
+	District    string `json:"district"`
+	Province    string `json:"province"`
+	PostalCode  string `json:"postalCode"`
+}
+
+// registerInput models the /auth/register JSON payload.
+//
+// HospitalCode is only required for memberType="internal". For "external"
+// users it is ignored. fullName is still accepted as a backward-compatible
+// fallback when callers haven't been updated to send firstName/lastName.
 type registerInput struct {
-	HospitalCode string `json:"hospitalCode" binding:"required"`
-	Username     string `json:"username"     binding:"required,min=3,max=32"`
-	FullName     string `json:"fullName"     binding:"required"`
-	Email        string `json:"email"`
-	Password     string `json:"password"     binding:"required,min=6"`
+	MemberType   string `json:"memberType"`
+	HospitalCode string `json:"hospitalCode"`
+
+	Username string `json:"username" binding:"required,min=3,max=32"`
+	Password string `json:"password" binding:"required,min=6"`
+
+	FirstName string `json:"firstName"`
+	LastName  string `json:"lastName"`
+	FullName  string `json:"fullName"`
+	Email     string `json:"email"`
+
+	Clinic       string `json:"clinic"`
+	LabName      string `json:"labName"`
+	HospitalType string `json:"hospitalType"`
+	BedSize      string `json:"bedSize"`
+
+	Address addressInput `json:"address"`
+
+	CertificateYear int `json:"certificateYear"`
 }
 
 func (h *AuthHandler) Register(c *gin.Context) {
@@ -31,19 +60,40 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
 	out, err := h.svc.Register(c.Request.Context(), service.RegisterInput{
+		MemberType:   in.MemberType,
 		HospitalCode: in.HospitalCode,
 		Username:     in.Username,
+		Password:     in.Password,
+		FirstName:    in.FirstName,
+		LastName:     in.LastName,
 		FullName:     in.FullName,
 		Email:        in.Email,
-		Password:     in.Password,
+		Clinic:       in.Clinic,
+		LabName:      in.LabName,
+		HospitalType: in.HospitalType,
+		BedSize:      in.BedSize,
+		Address: service.RegisterAddress{
+			AddressNo:   in.Address.AddressNo,
+			Building:    in.Address.Building,
+			SubDistrict: in.Address.SubDistrict,
+			District:    in.Address.District,
+			Province:    in.Address.Province,
+			PostalCode:  in.Address.PostalCode,
+		},
+		CertificateYear: in.CertificateYear,
+		IP:              c.ClientIP(),
+		UserAgent:       c.Request.UserAgent(),
 	})
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrHospitalNotFound):
 			c.JSON(http.StatusBadRequest, gin.H{"error": "ไม่พบรหัสโรงพยาบาลนี้"})
 		case errors.Is(err, service.ErrUsernameExists):
-			c.JSON(http.StatusConflict, gin.H{"error": "username นี้มีอยู่แล้วในโรงพยาบาลของคุณ"})
+			c.JSON(http.StatusConflict, gin.H{"error": "username นี้ถูกใช้งานแล้ว กรุณาเลือก username ใหม่"})
+		case errors.Is(err, service.ErrInvalidMemberType):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "ประเภทสมาชิกไม่ถูกต้อง"})
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		}
@@ -53,10 +103,8 @@ func (h *AuthHandler) Register(c *gin.Context) {
 }
 
 type loginInput struct {
-	HospitalCode string `json:"hospitalCode"`
-	Username     string `json:"username"  binding:"required"`
-	Password     string `json:"password"  binding:"required"`
-	IsAdmin      bool   `json:"isAdmin"`
+	Username string `json:"username" binding:"required"`
+	Password string `json:"password" binding:"required"`
 }
 
 func (h *AuthHandler) Login(c *gin.Context) {
@@ -66,10 +114,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 	out, err := h.svc.Login(c.Request.Context(), service.LoginInput{
-		HospitalCode: in.HospitalCode,
-		Username:     in.Username,
-		Password:     in.Password,
-		IsAdmin:      in.IsAdmin,
+		Username: in.Username,
+		Password: in.Password,
 	})
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"})

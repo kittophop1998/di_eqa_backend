@@ -64,13 +64,16 @@ func Bootstrap() *App {
 	quizRepo := mongorepo.NewQuizRepo(database.Collection("quizzes"))
 	sessionRepo := mongorepo.NewSessionRepo(database.Collection("sessions"))
 	submissionRepo := mongorepo.NewSubmissionRepo(database.Collection("submissions"))
+	auditRepo := mongorepo.NewAuditLogRepo(database.Collection("audit_logs"))
 
 	// 7. Wire cache adapter (driven)
 	cacheAdapter := adaptercache.NewRedisCache(redisClient)
 
 	// 8. Wire application services (use cases)
-	authSvc := service.NewAuthService(userRepo, hospitalRepo, cfg)
+	auditSvc := service.NewAuditService(auditRepo)
+	authSvc := service.NewAuthService(userRepo, hospitalRepo, auditSvc, cfg)
 	hospitalSvc := service.NewHospitalService(hospitalRepo)
+	userMgmtSvc := service.NewUserService(userRepo, hospitalRepo, auditSvc)
 	quizSvc := service.NewQuizService(
 		quizRepo, sessionRepo, submissionRepo, userRepo, hospitalRepo,
 		cacheAdapter, hub, cfg.SupabaseURL, cfg.SupabaseBucket,
@@ -86,6 +89,8 @@ func Bootstrap() *App {
 		QuizHandler:    adapthttp.NewQuizHandler(quizSvc),
 		SessionHandler: adapthttp.NewSessionHandler(sessionSvc),
 		WSHandler:      adapthttp.NewWSHandler(hub, wsLookup),
+		UserHandler:    adapthttp.NewUserHandler(userMgmtSvc),
+		AuditHandler:   adapthttp.NewAuditHandler(auditSvc),
 	}
 
 	return &App{

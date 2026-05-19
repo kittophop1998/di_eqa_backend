@@ -11,6 +11,8 @@ var (
 	ErrNotFound           = errors.New("not found")
 	ErrHospitalNotFound   = errors.New("hospital not found")
 	ErrUsernameExists     = errors.New("username already exists in this hospital")
+	ErrUsernameTaken      = errors.New("username already taken")
+	ErrInvalidMemberType  = errors.New("invalid member type")
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrForbidden          = errors.New("forbidden")
 	ErrSessionNotRunning  = errors.New("session has not started")

@@ -93,26 +93,30 @@ func seedUsers(ctx context.Context, usersColl, hospitalsColl *mongo.Collection) 
 		return err
 	}
 
-	// ── seed admin (ไม่ผูกกับ รพ. ใด) ────────────────────────────────────────
-	adminCount, err := usersColl.CountDocuments(ctx, bson.M{"username": "admin", "role": entity.RoleAdmin})
+	// ── seed super_admin (ไม่ผูกกับ รพ. ใด) ─────────────────────────────────
+	// ถ้า document เดิมมี role=admin ให้อัปเกรดเป็น super_admin ก่อน
+	_, _ = usersColl.UpdateOne(ctx,
+		bson.M{"username": "admin", "role": entity.RoleAdmin},
+		bson.M{"$set": bson.M{"role": entity.RoleSuperAdmin}},
+	)
+	adminCount, err := usersColl.CountDocuments(ctx, bson.M{"username": "admin"})
 	if err != nil {
 		return err
 	}
 	if adminCount == 0 {
 		hash, _ := bcrypt.GenerateFromPassword([]byte("admin1234"), bcrypt.DefaultCost)
 		adminUser := entity.User{
-			// HospitalID ไม่ set → zero ObjectID → omitempty จะไม่ถูก store
 			Username:  "admin",
-			FullName:  "ผู้ดูแลระบบ",
+			FullName:  "Super Administrator",
 			Email:     "admin@di-eqa.local",
 			Password:  string(hash),
-			Role:      entity.RoleAdmin,
+			Role:      entity.RoleSuperAdmin,
 			CreatedAt: time.Now(),
 		}
 		if _, err := usersColl.InsertOne(ctx, adminUser); err != nil {
 			return err
 		}
-		log.Printf("👤 seeded user: admin (role=admin, no hospital)")
+		log.Printf("👤 seeded user: admin (role=super_admin, no hospital)")
 	}
 
 	// ── seed instructor + trainees ผูกกับ HOSP001 ────────────────────────────
