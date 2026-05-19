@@ -2,10 +2,10 @@ package handler
 
 import (
 	"errors"
-	"net/http"
 	"strconv"
 
 	"github.com/di-eqa/backend/internal/application/service"
+	"github.com/di-eqa/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 )
 
@@ -30,10 +30,10 @@ func (h *UserHandler) List(c *gin.Context) {
 		Limit:  limit,
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		utils.ErrInternalErr(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, out)
+	utils.RespondOK(c, out)
 }
 
 type updateRoleBody struct {
@@ -44,7 +44,7 @@ type updateRoleBody struct {
 func (h *UserHandler) UpdateRole(c *gin.Context) {
 	var body updateRoleBody
 	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		utils.ErrBadRequest(c, err.Error())
 		return
 	}
 
@@ -64,13 +64,13 @@ func (h *UserHandler) UpdateRole(c *gin.Context) {
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrNotFound):
-			c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบผู้ใช้"})
+			utils.ErrNotFound(c, "ไม่พบผู้ใช้")
 		case errors.Is(err, service.ErrForbidden):
-			c.JSON(http.StatusForbidden, gin.H{"error": "ไม่มีสิทธิ์ดำเนินการ"})
+			utils.ErrForbidden(c, "ไม่มีสิทธิ์ดำเนินการ")
 		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			utils.ErrInternalErr(c, err)
 		}
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	utils.RespondOK(c, gin.H{"ok": true})
 }

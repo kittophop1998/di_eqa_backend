@@ -1,10 +1,8 @@
 package handler
 
 import (
-	"errors"
-	"net/http"
-
 	"github.com/di-eqa/backend/internal/application/service"
+	"github.com/di-eqa/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 )
 
@@ -26,7 +24,7 @@ type createSessionInput struct {
 func (h *SessionHandler) Create(c *gin.Context) {
 	var in createSessionInput
 	if err := c.ShouldBindJSON(&in); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		utils.ErrBadRequest(c, err.Error())
 		return
 	}
 
@@ -44,49 +42,49 @@ func (h *SessionHandler) Create(c *gin.Context) {
 	})
 	if err != nil {
 		if service.IsBadRequest(err) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			utils.ErrBadRequest(c, err.Error())
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			utils.ErrInternalErr(c, err)
 		}
 		return
 	}
-	c.JSON(http.StatusOK, sess)
+	utils.RespondOK(c, sess)
 }
 
 func (h *SessionHandler) Start(c *gin.Context) {
 	sess, err := h.svc.Start(c.Request.Context(), c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+		utils.ErrNotFound(c, "session not found")
 		return
 	}
-	c.JSON(http.StatusOK, sess)
+	utils.RespondOK(c, sess)
 }
 
 func (h *SessionHandler) End(c *gin.Context) {
 	sess, err := h.svc.End(c.Request.Context(), c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+		utils.ErrNotFound(c, "session not found")
 		return
 	}
-	c.JSON(http.StatusOK, sess)
+	utils.RespondOK(c, sess)
 }
 
 func (h *SessionHandler) Get(c *gin.Context) {
 	sess, err := h.svc.Get(c.Request.Context(), c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+		utils.ErrNotFound(c, "session not found")
 		return
 	}
-	c.JSON(http.StatusOK, sess)
+	utils.RespondOK(c, sess)
 }
 
 func (h *SessionHandler) GetByCode(c *gin.Context) {
 	sess, err := h.svc.GetByCode(c.Request.Context(), c.Param("code"))
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+		utils.ErrNotFound(c, "session not found")
 		return
 	}
-	c.JSON(http.StatusOK, sess)
+	utils.RespondOK(c, sess)
 }
 
 func (h *SessionHandler) ListActive(c *gin.Context) {
@@ -97,11 +95,8 @@ func (h *SessionHandler) ListActive(c *gin.Context) {
 
 	list, err := h.svc.ListActive(c.Request.Context(), roleStr, hidStr)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		utils.ErrInternalErr(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, list)
+	utils.RespondOK(c, list)
 }
-
-// ensure errors package is used
-var _ = errors.New

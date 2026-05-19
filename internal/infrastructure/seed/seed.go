@@ -22,7 +22,6 @@ import (
 )
 
 func Run(db *mongo.Database, supabaseURL, supabaseBucket string) error {
-	// ใช้ timeout นานขึ้นเพราะ seedCellImageAssets ต้อง insert รูปหลายพันไฟล์
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -51,7 +50,7 @@ func Run(db *mongo.Database, supabaseURL, supabaseBucket string) error {
 	if err := seedHospitals(ctx, hospitalsColl); err != nil {
 		return err
 	}
-	if err := seedUsers(ctx, usersColl, hospitalsColl); err != nil {
+	if err := seedUsers(ctx, usersColl); err != nil {
 		return err
 	}
 	if err := seedQuizzes(ctx, quizzesColl, submissionsColl, usersColl, cellImageAssetsColl, supabaseURL, supabaseBucket); err != nil {
@@ -87,73 +86,34 @@ func seedHospitals(ctx context.Context, coll *mongo.Collection) error {
 	return nil
 }
 
-func seedUsers(ctx context.Context, usersColl, hospitalsColl *mongo.Collection) error {
-	var siriraj entity.Hospital
-	if err := hospitalsColl.FindOne(ctx, bson.M{"code": "HOSP001"}).Decode(&siriraj); err != nil {
-		return err
-	}
-
-	// ── seed super_admin (ไม่ผูกกับ รพ. ใด) ─────────────────────────────────
-	// ถ้า document เดิมมี role=admin ให้อัปเกรดเป็น super_admin ก่อน
+func seedUsers(ctx context.Context, usersColl *mongo.Collection) error {
+	// อัปเกรด document เดิมที่ยังเป็น role=admin → super_admin (migration)
 	_, _ = usersColl.UpdateOne(ctx,
 		bson.M{"username": "admin", "role": entity.RoleAdmin},
 		bson.M{"$set": bson.M{"role": entity.RoleSuperAdmin}},
 	)
-	adminCount, err := usersColl.CountDocuments(ctx, bson.M{"username": "admin"})
+
+	count, err := usersColl.CountDocuments(ctx, bson.M{"username": "admin"})
 	if err != nil {
 		return err
 	}
-	if adminCount == 0 {
-		hash, _ := bcrypt.GenerateFromPassword([]byte("admin1234"), bcrypt.DefaultCost)
-		adminUser := entity.User{
-			Username:  "admin",
-			FullName:  "Super Administrator",
-			Email:     "admin@di-eqa.local",
-			Password:  string(hash),
-			Role:      entity.RoleSuperAdmin,
-			CreatedAt: time.Now(),
-		}
-		if _, err := usersColl.InsertOne(ctx, adminUser); err != nil {
-			return err
-		}
-		log.Printf("👤 seeded user: admin (role=super_admin, no hospital)")
+	if count > 0 {
+		return nil
 	}
 
-	// ── seed instructor + trainees ผูกกับ HOSP001 ────────────────────────────
-	hospitalUsers := []struct {
-		Username string
-		FullName string
-		Password string
-		Role     string
-	}{
-		{"trainer", "วิทยากรอบรม", "trainer1234", entity.RoleInstructor},
-		{"trainee01", "ผู้เข้าอบรม คนที่ 1", "trainee1234", entity.RoleUser},
-		{"trainee02", "ผู้เข้าอบรม คนที่ 2", "trainee1234", entity.RoleUser},
+	hash, _ := bcrypt.GenerateFromPassword([]byte("admin1234"), bcrypt.DefaultCost)
+	adminUser := entity.User{
+		Username:  "admin",
+		FullName:  "Super Administrator",
+		Email:     "admin@di-eqa.local",
+		Password:  string(hash),
+		Role:      entity.RoleSuperAdmin,
+		CreatedAt: time.Now(),
 	}
-
-	for _, u := range hospitalUsers {
-		count, err := usersColl.CountDocuments(ctx, bson.M{"hospitalId": siriraj.ID, "username": u.Username})
-		if err != nil {
-			return err
-		}
-		if count > 0 {
-			continue
-		}
-		hash, _ := bcrypt.GenerateFromPassword([]byte(u.Password), bcrypt.DefaultCost)
-		user := entity.User{
-			HospitalID: siriraj.ID,
-			Username:   u.Username,
-			FullName:   u.FullName,
-			Email:      u.Username + "@siriraj.local",
-			Password:   string(hash),
-			Role:       u.Role,
-			CreatedAt:  time.Now(),
-		}
-		if _, err := usersColl.InsertOne(ctx, user); err != nil {
-			return err
-		}
-		log.Printf("👤 seeded user: %s/%s (role=%s)", siriraj.Code, u.Username, u.Role)
+	if _, err := usersColl.InsertOne(ctx, adminUser); err != nil {
+		return err
 	}
+	log.Printf("👤 seeded user: admin (role=super_admin)")
 	return nil
 }
 

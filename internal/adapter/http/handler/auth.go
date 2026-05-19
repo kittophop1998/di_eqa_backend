@@ -2,9 +2,9 @@ package handler
 
 import (
 	"errors"
-	"net/http"
 
 	"github.com/di-eqa/backend/internal/application/service"
+	"github.com/di-eqa/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 )
 
@@ -57,7 +57,7 @@ type registerInput struct {
 func (h *AuthHandler) Register(c *gin.Context) {
 	var in registerInput
 	if err := c.ShouldBindJSON(&in); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		utils.ErrBadRequest(c, err.Error())
 		return
 	}
 
@@ -89,17 +89,17 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrHospitalNotFound):
-			c.JSON(http.StatusBadRequest, gin.H{"error": "ไม่พบรหัสโรงพยาบาลนี้"})
+			utils.ErrBadRequest(c, "ไม่พบรหัสโรงพยาบาลนี้")
 		case errors.Is(err, service.ErrUsernameExists):
-			c.JSON(http.StatusConflict, gin.H{"error": "username นี้ถูกใช้งานแล้ว กรุณาเลือก username ใหม่"})
+			utils.ErrConflict(c, "username นี้ถูกใช้งานแล้ว กรุณาเลือก username ใหม่")
 		case errors.Is(err, service.ErrInvalidMemberType):
-			c.JSON(http.StatusBadRequest, gin.H{"error": "ประเภทสมาชิกไม่ถูกต้อง"})
+			utils.ErrBadRequest(c, "ประเภทสมาชิกไม่ถูกต้อง")
 		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			utils.ErrInternalErr(c, err)
 		}
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"token": out.Token, "user": out.User})
+	utils.RespondOK(c, gin.H{"token": out.Token, "user": out.User})
 }
 
 type loginInput struct {
@@ -110,7 +110,7 @@ type loginInput struct {
 func (h *AuthHandler) Login(c *gin.Context) {
 	var in loginInput
 	if err := c.ShouldBindJSON(&in); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		utils.ErrBadRequest(c, err.Error())
 		return
 	}
 	out, err := h.svc.Login(c.Request.Context(), service.LoginInput{
@@ -118,10 +118,10 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		Password: in.Password,
 	})
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"})
+		utils.ErrUnauthorized(c, "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"token": out.Token, "user": out.User})
+	utils.RespondOK(c, gin.H{"token": out.Token, "user": out.User})
 }
 
 func (h *AuthHandler) Me(c *gin.Context) {
@@ -130,8 +130,8 @@ func (h *AuthHandler) Me(c *gin.Context) {
 
 	pub, err := h.svc.Me(c.Request.Context(), userIDStr)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
+		utils.ErrUnauthorized(c, "user not found")
 		return
 	}
-	c.JSON(http.StatusOK, pub)
+	utils.RespondOK(c, pub)
 }

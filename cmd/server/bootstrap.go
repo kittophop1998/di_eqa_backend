@@ -25,8 +25,6 @@ type App struct {
 	Deps        router.Deps
 }
 
-// Bootstrap initialises every external dependency in order and returns a
-// fully-wired *App ready to serve requests.
 func Bootstrap() *App {
 	// 1. Configuration
 	cfg := config.Load()
@@ -84,6 +82,7 @@ func Bootstrap() *App {
 	wsLookup := adapthttp.NewWSUserLookup(userRepo, hospitalRepo)
 	deps := router.Deps{
 		Cfg:            cfg,
+		Redis:          redisClient,
 		HospHandler:    adapthttp.NewHospitalHandler(hospitalSvc),
 		AuthHandler:    adapthttp.NewAuthHandler(authSvc),
 		QuizHandler:    adapthttp.NewQuizHandler(quizSvc),

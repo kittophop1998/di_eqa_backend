@@ -1,10 +1,10 @@
 package handler
 
 import (
-	"net/http"
 	"strconv"
 
 	"github.com/di-eqa/backend/internal/application/service"
+	"github.com/di-eqa/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 )
 
@@ -31,8 +31,8 @@ func (h *AuditHandler) List(c *gin.Context) {
 		Limit:  limit,
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		utils.ErrInternalErr(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, out)
+	utils.RespondOK(c, out)
 }

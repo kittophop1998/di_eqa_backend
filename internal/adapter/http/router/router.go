@@ -10,11 +10,13 @@ import (
 	"github.com/di-eqa/backend/internal/infrastructure/config"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 )
 
 // Deps bundles all HTTP handlers the router needs.
 type Deps struct {
 	Cfg            *config.Config
+	Redis          *redis.Client
 	HospHandler    *handler.HospitalHandler
 	AuthHandler    *handler.AuthHandler
 	QuizHandler    *handler.QuizHandler
@@ -35,21 +37,29 @@ func Setup(r *gin.Engine, d Deps) *gin.Engine {
 		AllowCredentials: false,
 	}))
 
-	// Health check
+	// Rate limiters
+	// Strict: auth endpoints — 10 requests/minute per IP (brute-force protection)
+	authLimiter := middleware.RateLimit(d.Redis, "10-M")
+	// General: all other API routes — 120 requests/minute per IP
+	apiLimiter := middleware.RateLimit(d.Redis, "120-M")
+
+	// Health check (no rate limit)
 	r.GET("/api/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "di-eqa-backend"})
 	})
 
 	// Public routes
 	public := r.Group("/api")
+	public.Use(apiLimiter)
 	public.GET("/hospitals", d.HospHandler.List)
 	public.GET("/hospitals/:code", d.HospHandler.GetByCode)
-	public.POST("/auth/register", d.AuthHandler.Register)
-	public.POST("/auth/login", d.AuthHandler.Login)
+	// Auth endpoints use the stricter limiter
+	public.POST("/auth/register", authLimiter, d.AuthHandler.Register)
+	public.POST("/auth/login", authLimiter, d.AuthHandler.Login)
 
 	// Authenticated routes
 	authed := r.Group("/api")
-	authed.Use(middleware.Auth(d.Cfg.JWTSecret))
+	authed.Use(apiLimiter, middleware.Auth(d.Cfg.JWTSecret))
 
 	authed.GET("/auth/me", d.AuthHandler.Me)
 	authed.GET("/quizzes", d.QuizHandler.List)

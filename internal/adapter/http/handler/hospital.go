@@ -1,9 +1,8 @@
 package handler
 
 import (
-	"net/http"
-
 	"github.com/di-eqa/backend/internal/application/service"
+	"github.com/di-eqa/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 )
 
@@ -20,17 +19,17 @@ func (h *HospitalHandler) List(c *gin.Context) {
 	q := c.Query("q")
 	list, err := h.svc.List(c.Request.Context(), q)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		utils.ErrInternalErr(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, list)
+	utils.RespondOK(c, list)
 }
 
 func (h *HospitalHandler) GetByCode(c *gin.Context) {
 	hospital, err := h.svc.GetByCode(c.Request.Context(), c.Param("code"))
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "hospital not found"})
+		utils.ErrNotFound(c, "hospital not found")
 		return
 	}
-	c.JSON(http.StatusOK, hospital)
+	utils.RespondOK(c, hospital)
 }

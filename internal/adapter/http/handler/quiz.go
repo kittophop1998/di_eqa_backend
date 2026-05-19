@@ -2,10 +2,10 @@ package handler
 
 import (
 	"errors"
-	"net/http"
 	"strconv"
 
 	"github.com/di-eqa/backend/internal/application/service"
+	"github.com/di-eqa/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 )
 
@@ -26,10 +26,10 @@ func (h *QuizHandler) List(c *gin.Context) {
 
 	out, err := h.svc.List(c.Request.Context(), roleStr, hidStr)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		utils.ErrInternalErr(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, out)
+	utils.RespondOK(c, out)
 }
 
 func (h *QuizHandler) Get(c *gin.Context) {
@@ -45,17 +45,17 @@ func (h *QuizHandler) Get(c *gin.Context) {
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrForbidden):
-			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			utils.ErrForbidden(c, err.Error())
 		case errors.Is(err, service.ErrSessionNotRunning):
-			c.JSON(http.StatusForbidden, gin.H{"error": "session has not started yet"})
+			utils.ErrForbidden(c, "session has not started yet")
 		case errors.Is(err, service.ErrNotFound):
-			c.JSON(http.StatusNotFound, gin.H{"error": "quiz not found"})
+			utils.ErrNotFound(c, "quiz not found")
 		default:
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			utils.ErrBadRequest(c, err.Error())
 		}
 		return
 	}
-	c.JSON(http.StatusOK, out)
+	utils.RespondOK(c, out)
 }
 
 type submitInput struct {
@@ -67,7 +67,7 @@ type submitInput struct {
 func (h *QuizHandler) Submit(c *gin.Context) {
 	var in submitInput
 	if err := c.ShouldBindJSON(&in); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		utils.ErrBadRequest(c, err.Error())
 		return
 	}
 	if in.Assignments == nil {
@@ -87,15 +87,15 @@ func (h *QuizHandler) Submit(c *gin.Context) {
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrDuplicateSubmit):
-			c.JSON(http.StatusTooManyRequests, gin.H{"error": "กำลังประมวลผลคำตอบของคุณอยู่ กรุณารอสักครู่"})
+			utils.ErrTooManyRequests(c, "กำลังประมวลผลคำตอบของคุณอยู่ กรุณารอสักครู่")
 		case errors.Is(err, service.ErrNotFound):
-			c.JSON(http.StatusNotFound, gin.H{"error": "quiz not found"})
+			utils.ErrNotFound(c, "quiz not found")
 		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			utils.ErrInternalErr(c, err)
 		}
 		return
 	}
-	c.JSON(http.StatusOK, sub)
+	utils.RespondOK(c, sub)
 }
 
 func (h *QuizHandler) MyHistory(c *gin.Context) {
@@ -104,10 +104,10 @@ func (h *QuizHandler) MyHistory(c *gin.Context) {
 
 	subs, err := h.svc.MyHistory(c.Request.Context(), userIDStr)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		utils.ErrInternalErr(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, subs)
+	utils.RespondOK(c, subs)
 }
 
 func (h *QuizHandler) GetSubmission(c *gin.Context) {
@@ -116,10 +116,10 @@ func (h *QuizHandler) GetSubmission(c *gin.Context) {
 
 	sub, err := h.svc.GetSubmission(c.Request.Context(), c.Param("id"), userIDStr)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		utils.ErrNotFound(c, "not found")
 		return
 	}
-	c.JSON(http.StatusOK, sub)
+	utils.RespondOK(c, sub)
 }
 
 func (h *QuizHandler) Leaderboard(c *gin.Context) {
@@ -131,8 +131,8 @@ func (h *QuizHandler) Leaderboard(c *gin.Context) {
 
 	out, err := h.svc.Leaderboard(c.Request.Context(), c.Param("id"), limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		utils.ErrInternalErr(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, out)
+	utils.RespondOK(c, out)
 }

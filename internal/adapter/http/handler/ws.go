@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/di-eqa/backend/internal/adapter/ws"
+	"github.com/di-eqa/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -38,7 +39,7 @@ func (h *WSHandler) Handle(c *gin.Context) {
 	uid, _ := c.Get("userId")
 	userID, err := primitive.ObjectIDFromHex(uid.(string))
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user"})
+		utils.ErrUnauthorized(c, "invalid user")
 		return
 	}
 
@@ -47,7 +48,7 @@ func (h *WSHandler) Handle(c *gin.Context) {
 
 	username, fullName, hospitalName, err := h.userLookup.FindByID(ctx, userID)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
+		utils.ErrUnauthorized(c, "user not found")
 		return
 	}
 
