@@ -87,6 +87,12 @@ func Setup(r *gin.Engine, d Deps) *gin.Engine {
 	superAdmin.GET("/users", d.UserHandler.List)
 	superAdmin.PATCH("/users/:id/role", d.UserHandler.UpdateRole)
 	superAdmin.GET("/audit-logs", d.AuditHandler.List)
+	// Hospital management. The public GET tree already owns /hospitals/:code;
+	// these live in the POST/PUT/DELETE trees, so the wildcard names differ
+	// without conflicting.
+	superAdmin.POST("/hospitals", d.HospHandler.Create)
+	superAdmin.PUT("/hospitals/:id", d.HospHandler.Update)
+	superAdmin.DELETE("/hospitals/:id", d.HospHandler.Delete)
 
 	return r
 }

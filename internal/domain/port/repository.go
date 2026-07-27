@@ -20,6 +20,7 @@ type UserRepository interface {
 	CountByUsername(ctx context.Context, username string) (int64, error)
 	CountByUsernameAndHospital(ctx context.Context, username string, hospitalID primitive.ObjectID) (int64, error)
 	CountExternalByUsername(ctx context.Context, username string) (int64, error)
+	CountByHospital(ctx context.Context, hospitalID primitive.ObjectID) (int64, error)
 	Create(ctx context.Context, user *entity.User) (primitive.ObjectID, error)
 	ListAll(ctx context.Context, search string, skip, limit int64) ([]entity.User, int64, error)
 	UpdateRole(ctx context.Context, id primitive.ObjectID, role string) error
@@ -30,6 +31,9 @@ type HospitalRepository interface {
 	List(ctx context.Context, query string) ([]entity.Hospital, error)
 	FindByCode(ctx context.Context, code string) (*entity.Hospital, error)
 	FindByID(ctx context.Context, id primitive.ObjectID) (*entity.Hospital, error)
+	Create(ctx context.Context, h *entity.Hospital) (primitive.ObjectID, error)
+	Update(ctx context.Context, id primitive.ObjectID, h *entity.Hospital) error
+	Delete(ctx context.Context, id primitive.ObjectID) error
 }
 
 // QuizRepository — port for quiz persistence

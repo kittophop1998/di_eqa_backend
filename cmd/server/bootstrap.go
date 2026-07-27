@@ -73,7 +73,7 @@ func Bootstrap() *App {
 	jwtService := security.NewJWTService(cfg.JWTSecret, cfg.JWTExpiry)
 	passwordHasher := security.NewBcryptHasher(0)
 	authSvc := service.NewAuthService(userRepo, hospitalRepo, auditSvc, jwtService, passwordHasher)
-	hospitalSvc := service.NewHospitalService(hospitalRepo)
+	hospitalSvc := service.NewHospitalService(hospitalRepo, userRepo, auditSvc)
 	userMgmtSvc := service.NewUserService(userRepo, hospitalRepo, auditSvc)
 	quizSvc := service.NewQuizService(
 		quizRepo, sessionRepo, submissionRepo, userRepo, hospitalRepo,

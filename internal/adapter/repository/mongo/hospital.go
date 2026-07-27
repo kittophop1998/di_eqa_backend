@@ -31,6 +31,10 @@ func (r *HospitalRepo) List(ctx context.Context, query string) ([]entity.Hospita
 		filter = bson.M{"$or": []bson.M{
 			{"name": bson.M{"$regex": q, "$options": "i"}},
 			{"code": bson.M{"$regex": q, "$options": "i"}},
+			{"province": bson.M{"$regex": q, "$options": "i"}},
+			{"district": bson.M{"$regex": q, "$options": "i"}},
+			{"subDistrict": bson.M{"$regex": q, "$options": "i"}},
+			{"postalCode": bson.M{"$regex": q, "$options": "i"}},
 		}}
 	}
 
@@ -69,4 +73,50 @@ func (r *HospitalRepo) FindByID(ctx context.Context, id primitive.ObjectID) (*en
 		return nil, err
 	}
 	return &h, nil
+}
+
+func (r *HospitalRepo) Create(ctx context.Context, h *entity.Hospital) (primitive.ObjectID, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	res, err := r.coll.InsertOne(ctx, h)
+	if err != nil {
+		return primitive.NilObjectID, err
+	}
+	return res.InsertedID.(primitive.ObjectID), nil
+}
+
+// Update overwrites the editable fields of a hospital; _id and createdAt are
+// left untouched.
+func (r *HospitalRepo) Update(ctx context.Context, id primitive.ObjectID, h *entity.Hospital) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	res, err := r.coll.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": bson.M{
+		"code":        h.Code,
+		"name":        h.Name,
+		"logo":        h.Logo,
+		"province":    h.Province,
+		"district":    h.District,
+		"subDistrict": h.SubDistrict,
+		"postalCode":  h.PostalCode,
+	}})
+	if err != nil {
+		return err
+	}
+	if res.MatchedCount == 0 {
+		return mongodriver.ErrNoDocuments
+	}
+	return nil
+}
+
+func (r *HospitalRepo) Delete(ctx context.Context, id primitive.ObjectID) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	res, err := r.coll.DeleteOne(ctx, bson.M{"_id": id})
+	if err != nil {
+		return err
+	}
+	if res.DeletedCount == 0 {
+		return mongodriver.ErrNoDocuments
+	}
+	return nil
 }

@@ -107,6 +107,14 @@ func (r *UserRepo) CountExternalByUsername(ctx context.Context, username string)
 	})
 }
 
+// CountByHospital counts the users currently attached to a hospital. Used to
+// block deletion of a hospital that still has members.
+func (r *UserRepo) CountByHospital(ctx context.Context, hospitalID primitive.ObjectID) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return r.coll.CountDocuments(ctx, bson.M{"hospitalId": hospitalID})
+}
+
 func (r *UserRepo) Create(ctx context.Context, user *entity.User) (primitive.ObjectID, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()

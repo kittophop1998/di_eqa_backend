@@ -3,6 +3,7 @@ package seed
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -63,25 +64,56 @@ func Run(db *mongo.Database, supabaseURL, supabaseBucket string) error {
 
 func seedHospitals(ctx context.Context, coll *mongo.Collection) error {
 	hospitals := []entity.Hospital{
-		{Code: "HOSP001", Name: "โรงพยาบาลศิริราช", Province: "กรุงเทพมหานคร", Logo: "🏥"},
-		{Code: "HOSP002", Name: "โรงพยาบาลจุฬาลงกรณ์ สภากาชาดไทย", Province: "กรุงเทพมหานคร", Logo: "🏥"},
-		{Code: "HOSP003", Name: "โรงพยาบาลรามาธิบดี", Province: "กรุงเทพมหานคร", Logo: "🏥"},
-		{Code: "HOSP004", Name: "โรงพยาบาลมหาราชนครเชียงใหม่", Province: "เชียงใหม่", Logo: "🏥"},
-		{Code: "HOSP005", Name: "โรงพยาบาลสงขลานครินทร์", Province: "สงขลา", Logo: "🏥"},
-		{Code: "HOSP006", Name: "โรงพยาบาลศรีนครินทร์ ขอนแก่น", Province: "ขอนแก่น", Logo: "🏥"},
+		{Code: "HOSP001", Name: "โรงพยาบาลศิริราช", Logo: "🏥",
+			SubDistrict: "ศิริราช", District: "บางกอกน้อย", Province: "กรุงเทพมหานคร", PostalCode: "10700"},
+		{Code: "HOSP002", Name: "โรงพยาบาลจุฬาลงกรณ์ สภากาชาดไทย", Logo: "🏥",
+			SubDistrict: "ปทุมวัน", District: "ปทุมวัน", Province: "กรุงเทพมหานคร", PostalCode: "10330"},
+		{Code: "HOSP003", Name: "โรงพยาบาลรามาธิบดี", Logo: "🏥",
+			SubDistrict: "ทุ่งพญาไท", District: "ราชเทวี", Province: "กรุงเทพมหานคร", PostalCode: "10400"},
+		{Code: "HOSP004", Name: "โรงพยาบาลมหาราชนครเชียงใหม่", Logo: "🏥",
+			SubDistrict: "ศรีภูมิ", District: "เมืองเชียงใหม่", Province: "เชียงใหม่", PostalCode: "50200"},
+		{Code: "HOSP005", Name: "โรงพยาบาลสงขลานครินทร์", Logo: "🏥",
+			SubDistrict: "คอหงส์", District: "หาดใหญ่", Province: "สงขลา", PostalCode: "90110"},
+		{Code: "HOSP006", Name: "โรงพยาบาลศรีนครินทร์ ขอนแก่น", Logo: "🏥",
+			SubDistrict: "ในเมือง", District: "เมืองขอนแก่น", Province: "ขอนแก่น", PostalCode: "40002"},
 	}
 	for _, h := range hospitals {
-		count, err := coll.CountDocuments(ctx, bson.M{"code": h.Code})
-		if err != nil {
-			return err
-		}
-		if count == 0 {
+		var existing entity.Hospital
+		err := coll.FindOne(ctx, bson.M{"code": h.Code}).Decode(&existing)
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			h.CreatedAt = time.Now()
 			if _, err := coll.InsertOne(ctx, h); err != nil {
 				return err
 			}
 			log.Printf("🏥 seeded hospital: %s - %s", h.Code, h.Name)
+			continue
 		}
+		if err != nil {
+			return err
+		}
+
+		// Backfill only the address fields that are still empty, so documents
+		// edited through the admin panel are never overwritten on restart.
+		fill := bson.M{}
+		if existing.Province == "" {
+			fill["province"] = h.Province
+		}
+		if existing.District == "" {
+			fill["district"] = h.District
+		}
+		if existing.SubDistrict == "" {
+			fill["subDistrict"] = h.SubDistrict
+		}
+		if existing.PostalCode == "" {
+			fill["postalCode"] = h.PostalCode
+		}
+		if len(fill) == 0 {
+			continue
+		}
+		if _, err := coll.UpdateOne(ctx, bson.M{"_id": existing.ID}, bson.M{"$set": fill}); err != nil {
+			return err
+		}
+		log.Printf("🏥 backfilled hospital address: %s - %s", h.Code, h.Name)
 	}
 	return nil
 }

@@ -11,6 +11,9 @@ import (
 const (
 	AuditActionUserRegister   = "user.register"
 	AuditActionUserRoleChange = "user.role_change"
+	AuditActionHospitalCreate = "hospital.create"
+	AuditActionHospitalUpdate = "hospital.update"
+	AuditActionHospitalDelete = "hospital.delete"
 )
 
 // AuditLog is an immutable record of a security/governance-relevant event.
