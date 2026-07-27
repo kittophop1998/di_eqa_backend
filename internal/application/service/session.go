@@ -166,7 +166,7 @@ func (s *SessionService) GetByCode(ctx context.Context, code string) (*entity.Se
 
 func (s *SessionService) ListActive(ctx context.Context, role, hospitalIDHex string) ([]entity.Session, error) {
 	var hospID *primitive.ObjectID
-	if role != entity.RoleAdmin && hospitalIDHex != "" {
+	if role != entity.RoleAdmin && role != entity.RoleSuperAdmin && hospitalIDHex != "" {
 		if oid, err := parseOID(hospitalIDHex); err == nil {
 			hospID = &oid
 		}

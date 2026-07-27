@@ -80,7 +80,7 @@ func (s *QuizService) List(ctx context.Context, role, hospitalIDHex string) ([]Q
 	var quizzes []entity.Quiz
 	var err error
 
-	if role == entity.RoleAdmin || role == entity.RoleInstructor {
+	if role == entity.RoleAdmin || role == entity.RoleInstructor || role == entity.RoleSuperAdmin {
 		quizzes, err = s.quizzes.ListAll(ctx)
 	} else {
 		var hospID *primitive.ObjectID
@@ -135,8 +135,9 @@ func (s *QuizService) Get(ctx context.Context, quizIDHex, userIDHex, sessionIDHe
 		return nil, ErrNotFound
 	}
 
-	// If session is specified and user is not admin, validate session is running
-	if sessionIDHex != "" && role != entity.RoleAdmin {
+	// If session is specified and user is not an admin, validate session is running.
+	// Super admins have the same unrestricted access as admins.
+	if sessionIDHex != "" && role != entity.RoleAdmin && role != entity.RoleSuperAdmin {
 		sessionOID, err := parseOID(sessionIDHex)
 		if err != nil {
 			return nil, fmt.Errorf("invalid session id")
