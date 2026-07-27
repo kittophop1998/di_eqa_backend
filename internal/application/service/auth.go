@@ -5,11 +5,9 @@ import (
 	"strings"
 	"time"
 
+	applicationport "github.com/di-eqa/backend/internal/application/port"
 	"github.com/di-eqa/backend/internal/domain/entity"
 	"github.com/di-eqa/backend/internal/domain/port"
-	"github.com/di-eqa/backend/internal/infrastructure/config"
-	"github.com/di-eqa/backend/internal/utils"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // AuthService handles user registration and login use cases.
@@ -17,11 +15,18 @@ type AuthService struct {
 	users     port.UserRepository
 	hospitals port.HospitalRepository
 	audit     *AuditService
-	cfg       *config.Config
+	tokens    applicationport.TokenIssuer
+	passwords applicationport.PasswordHasher
 }
 
-func NewAuthService(u port.UserRepository, h port.HospitalRepository, audit *AuditService, cfg *config.Config) *AuthService {
-	return &AuthService{users: u, hospitals: h, audit: audit, cfg: cfg}
+func NewAuthService(
+	u port.UserRepository,
+	h port.HospitalRepository,
+	audit *AuditService,
+	tokens applicationport.TokenIssuer,
+	passwords applicationport.PasswordHasher,
+) *AuthService {
+	return &AuthService{users: u, hospitals: h, audit: audit, tokens: tokens, passwords: passwords}
 }
 
 // RegisterAddress mirrors entity.Address in the application layer.
@@ -108,7 +113,7 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*Register
 		CertificateYear: in.CertificateYear,
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
+	hash, err := s.passwords.Hash(in.Password)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +122,7 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*Register
 		Username:  username,
 		FullName:  fullName,
 		Email:     strings.TrimSpace(in.Email),
-		Password:  string(hash),
+		Password:  hash,
 		Role:      entity.RoleUser,
 		Profile:   profile,
 		CreatedAt: time.Now(),
@@ -144,7 +149,9 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*Register
 	if hospital != nil {
 		hospitalIDHex = hospital.ID.Hex()
 	}
-	token, err := utils.GenerateToken(s.cfg.JWTSecret, user.ID.Hex(), hospitalIDHex, user.Role, s.cfg.JWTExpiry)
+	token, err := s.tokens.Issue(applicationport.TokenClaims{
+		UserID: user.ID.Hex(), HospitalID: hospitalIDHex, Role: user.Role,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +220,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginOutput, e
 		return nil, ErrInvalidCredentials
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(in.Password)); err != nil {
+	if err := s.passwords.Compare(user.Password, in.Password); err != nil {
 		return nil, ErrInvalidCredentials
 	}
 
@@ -227,7 +234,9 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginOutput, e
 		hospitalIDHex = user.HospitalID.Hex()
 	}
 
-	token, err := utils.GenerateToken(s.cfg.JWTSecret, user.ID.Hex(), hospitalIDHex, user.Role, s.cfg.JWTExpiry)
+	token, err := s.tokens.Issue(applicationport.TokenClaims{
+		UserID: user.ID.Hex(), HospitalID: hospitalIDHex, Role: user.Role,
+	})
 	if err != nil {
 		return nil, err
 	}

@@ -27,7 +27,7 @@ func Load() *Config {
 		MongoDB:        getEnv("MONGO_DB", "di_eqa"),
 		RedisAddr:      redisAddr,
 		RedisPassword:  getEnv("REDIS_PASSWORD", ""),
-		JWTSecret:      getEnv("JWT_SECRET", "change-me-in-production-please-this-is-a-dev-secret"),
+		JWTSecret:      getEnv("JWT_SECRET", "8r20LhfS3AGu3fyyPrUi4Lv8FHWAysr5LpqdRRuMX2tHdOTl1DbCWze8ilbM5W4y"),
 		JWTExpiry:      12 * time.Hour,
 		AllowedOrigin:  getEnv("ALLOWED_ORIGIN", "*"),
 		SupabaseURL:    getEnv("SUPABASE_URL", "https://wcrrkhgfaxfcxegotpef.supabase.co"),

@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	utils "github.com/di-eqa/backend/internal/adapter/http/response"
 	"github.com/di-eqa/backend/internal/adapter/ws"
-	"github.com/di-eqa/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"go.mongodb.org/mongo-driver/bson/primitive"

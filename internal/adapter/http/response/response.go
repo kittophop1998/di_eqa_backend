@@ -1,4 +1,5 @@
-package utils
+// Package response owns JSON response formatting for the HTTP adapter.
+package response
 
 import (
 	"net/http"

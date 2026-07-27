@@ -4,12 +4,18 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/di-eqa/backend/internal/utils"
+	applicationport "github.com/di-eqa/backend/internal/application/port"
 	"github.com/gin-gonic/gin"
 )
 
 // Auth validates the JWT token from Authorization header or query param.
-func Auth(secret string) gin.HandlerFunc {
+// TokenVerifier is implemented by the security adapter. Keeping this small
+// interface local to the HTTP adapter avoids exposing JWT details to routing.
+type TokenVerifier interface {
+	Verify(string) (applicationport.TokenClaims, error)
+}
+
+func Auth(tokens TokenVerifier) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		var token string
@@ -26,7 +32,7 @@ func Auth(secret string) gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing token"})
 			return
 		}
-		claims, err := utils.ParseToken(secret, token)
+		claims, err := tokens.Verify(token)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			return

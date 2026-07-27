@@ -1,8 +1,8 @@
 package handler
 
 import (
+	utils "github.com/di-eqa/backend/internal/adapter/http/response"
 	"github.com/di-eqa/backend/internal/application/service"
-	"github.com/di-eqa/backend/internal/utils"
 	"github.com/gin-gonic/gin"
 )
 

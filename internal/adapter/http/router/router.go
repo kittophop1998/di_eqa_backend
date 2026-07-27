@@ -24,6 +24,7 @@ type Deps struct {
 	WSHandler      *handler.WSHandler
 	UserHandler    *handler.UserHandler
 	AuditHandler   *handler.AuditHandler
+	TokenVerifier  middleware.TokenVerifier
 }
 
 // Setup registers all middleware and route groups on the provided *gin.Engine.
@@ -59,7 +60,7 @@ func Setup(r *gin.Engine, d Deps) *gin.Engine {
 
 	// Authenticated routes
 	authed := r.Group("/api")
-	authed.Use(apiLimiter, middleware.Auth(d.Cfg.JWTSecret))
+	authed.Use(apiLimiter, middleware.Auth(d.TokenVerifier))
 
 	authed.GET("/auth/me", d.AuthHandler.Me)
 	authed.GET("/quizzes", d.QuizHandler.List)

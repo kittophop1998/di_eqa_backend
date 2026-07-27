@@ -7,6 +7,7 @@ import (
 	adapthttp "github.com/di-eqa/backend/internal/adapter/http/handler"
 	"github.com/di-eqa/backend/internal/adapter/http/router"
 	mongorepo "github.com/di-eqa/backend/internal/adapter/repository/mongo"
+	"github.com/di-eqa/backend/internal/adapter/security"
 	adaptws "github.com/di-eqa/backend/internal/adapter/ws"
 	"github.com/di-eqa/backend/internal/application/service"
 	"github.com/di-eqa/backend/internal/infrastructure/cache"
@@ -69,7 +70,9 @@ func Bootstrap() *App {
 
 	// 8. Wire application services (use cases)
 	auditSvc := service.NewAuditService(auditRepo)
-	authSvc := service.NewAuthService(userRepo, hospitalRepo, auditSvc, cfg)
+	jwtService := security.NewJWTService(cfg.JWTSecret, cfg.JWTExpiry)
+	passwordHasher := security.NewBcryptHasher(0)
+	authSvc := service.NewAuthService(userRepo, hospitalRepo, auditSvc, jwtService, passwordHasher)
 	hospitalSvc := service.NewHospitalService(hospitalRepo)
 	userMgmtSvc := service.NewUserService(userRepo, hospitalRepo, auditSvc)
 	quizSvc := service.NewQuizService(
@@ -82,6 +85,7 @@ func Bootstrap() *App {
 	wsLookup := adapthttp.NewWSUserLookup(userRepo, hospitalRepo)
 	deps := router.Deps{
 		Cfg:            cfg,
+		TokenVerifier:  jwtService,
 		Redis:          redisClient,
 		HospHandler:    adapthttp.NewHospitalHandler(hospitalSvc),
 		AuthHandler:    adapthttp.NewAuthHandler(authSvc),
