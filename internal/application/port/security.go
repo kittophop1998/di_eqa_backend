@@ -2,17 +2,24 @@
 // the outside world. Implementations belong in adapter/.
 package port
 
+import (
+	"errors"
+	"time"
+)
+
+// ErrTokenExpired is returned by TokenVerifier when the token is valid but expired.
+var ErrTokenExpired = errors.New("token expired")
+
 // TokenClaims is the authenticated identity exchanged between the application
-// and its token adapter. It intentionally has no JWT or HTTP dependency.
+// and its token adapter. It carries only the subject: role, status and hospital
+// are always re-read from the database (BR-02).
 type TokenClaims struct {
-	UserID     string
-	HospitalID string
-	Role       string
+	UserID string
 }
 
 // TokenIssuer creates a signed token for an authenticated identity.
 type TokenIssuer interface {
-	Issue(TokenClaims) (string, error)
+	Issue(TokenClaims) (token string, expiresAt time.Time, err error)
 }
 
 // PasswordHasher protects and verifies passwords. The application never

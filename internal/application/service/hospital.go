@@ -2,39 +2,97 @@ package service
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
+	applicationport "github.com/di-eqa/backend/internal/application/port"
 	"github.com/di-eqa/backend/internal/domain/entity"
 	"github.com/di-eqa/backend/internal/domain/port"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-// HospitalService handles hospital query and management use cases.
+// HospitalService handles the public hospital list and admin hospital management.
 type HospitalService struct {
-	hospitals port.HospitalRepository
-	users     port.UserRepository
-	audit     *AuditService
+	hospitals   port.HospitalRepository
+	users       port.UserRepository
+	assignments port.AssignmentRepository
+	audit       *AuditService
+	clock       applicationport.Clock
 }
 
-func NewHospitalService(h port.HospitalRepository, u port.UserRepository, audit *AuditService) *HospitalService {
-	return &HospitalService{hospitals: h, users: u, audit: audit}
+func NewHospitalService(
+	h port.HospitalRepository, u port.UserRepository, a port.AssignmentRepository,
+	audit *AuditService, clock applicationport.Clock,
+) *HospitalService {
+	return &HospitalService{hospitals: h, users: u, assignments: a, audit: audit, clock: clock}
 }
 
-func (s *HospitalService) List(ctx context.Context, query string) ([]entity.Hospital, error) {
-	return s.hospitals.List(ctx, query)
-}
-
-func (s *HospitalService) GetByCode(ctx context.Context, code string) (*entity.Hospital, error) {
-	h, err := s.hospitals.FindByCode(ctx, code)
+// ListPublic returns active hospitals as {id,name} only; codes are never
+// exposed (BR-43).
+func (s *HospitalService) ListPublic(ctx context.Context) ([]HospitalRef, error) {
+	list, err := s.hospitals.ListActive(ctx)
 	if err != nil {
-		return nil, ErrNotFound
+		return nil, internal(err)
 	}
-	return h, nil
+	out := make([]HospitalRef, 0, len(list))
+	for i := range list {
+		out = append(out, HospitalRef{ID: list[i].ID.Hex(), Name: list[i].Name})
+	}
+	return out, nil
 }
 
-// HospitalFields carries the editable attributes of a hospital. Shared by the
-// create and update use cases so both validate identically.
+// AdminHospital is the admin view of a hospital (§5.6).
+type AdminHospital struct {
+	ID          string    `json:"id"`
+	Code        string    `json:"code"`
+	Name        string    `json:"name"`
+	Province    string    `json:"province"`
+	District    string    `json:"district"`
+	SubDistrict string    `json:"subDistrict"`
+	PostalCode  string    `json:"postalCode"`
+	Logo        string    `json:"logo"`
+	Active      bool      `json:"active"`
+	UserCount   int64     `json:"userCount"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// ListHospitalsInput drives the admin list.
+type ListHospitalsInput struct {
+	Query    string
+	Active   *bool
+	Page     int
+	PageSize int
+}
+
+func (s *HospitalService) List(ctx context.Context, in ListHospitalsInput) (*Paged[AdminHospital], error) {
+	page, size := normalizePage(in.Page, in.PageSize)
+	list, total, err := s.hospitals.List(ctx,
+		port.HospitalFilter{Query: strings.TrimSpace(in.Query), Active: in.Active},
+		port.Page{Page: page, PageSize: size})
+	if err != nil {
+		return nil, internal(err)
+	}
+	items := make([]AdminHospital, 0, len(list))
+	for i := range list {
+		n, err := s.users.CountByHospital(ctx, list[i].ID)
+		if err != nil {
+			return nil, internal(err)
+		}
+		items = append(items, toAdminHospital(&list[i], n))
+	}
+	return &Paged[AdminHospital]{Items: items, Page: page, PageSize: size, Total: total}, nil
+}
+
+func toAdminHospital(h *entity.Hospital, users int64) AdminHospital {
+	return AdminHospital{
+		ID: h.ID.Hex(), Code: h.Code, Name: h.Name, Province: h.Province,
+		District: h.District, SubDistrict: h.SubDistrict, PostalCode: h.PostalCode,
+		Logo: h.Logo, Active: h.Active, UserCount: users, CreatedAt: h.CreatedAt,
+	}
+}
+
+// HospitalFields carries the editable attributes of a hospital.
 type HospitalFields struct {
 	Code        string
 	Name        string
@@ -43,19 +101,10 @@ type HospitalFields struct {
 	District    string
 	SubDistrict string
 	PostalCode  string
+	Active      *bool // update only; nil keeps the current value
 }
 
-// Actor identifies the authenticated caller for audit records.
-type Actor struct {
-	ID        string
-	Role      string
-	IP        string
-	UserAgent string
-}
-
-// normalise trims every field and upper-cases the code so lookups by code stay
-// case-insensitive, then validates the ones with a required format.
-func (f *HospitalFields) normalise() error {
+func (f *HospitalFields) normalise() *Error {
 	f.Code = strings.ToUpper(strings.TrimSpace(f.Code))
 	f.Name = strings.TrimSpace(f.Name)
 	f.Logo = strings.TrimSpace(f.Logo)
@@ -64,16 +113,22 @@ func (f *HospitalFields) normalise() error {
 	f.SubDistrict = strings.TrimSpace(f.SubDistrict)
 	f.PostalCode = strings.TrimSpace(f.PostalCode)
 
-	if f.Code == "" || f.Name == "" {
-		return ErrBadInput
+	var issues []entity.FieldIssue
+	if f.Code == "" {
+		issues = append(issues, entity.FieldIssue{Field: "code", Issue: "is required"})
+	}
+	if f.Name == "" {
+		issues = append(issues, entity.FieldIssue{Field: "name", Issue: "is required"})
 	}
 	if f.PostalCode != "" && !isThaiPostalCode(f.PostalCode) {
-		return ErrInvalidPostalCode
+		issues = append(issues, entity.FieldIssue{Field: "postalCode", Issue: "must be 5 digits"})
+	}
+	if len(issues) > 0 {
+		return validation(issues...)
 	}
 	return nil
 }
 
-// isThaiPostalCode reports whether s is exactly five ASCII digits.
 func isThaiPostalCode(s string) bool {
 	if len(s) != 5 {
 		return false
@@ -86,133 +141,112 @@ func isThaiPostalCode(s string) bool {
 	return true
 }
 
-func (s *HospitalService) Create(ctx context.Context, in HospitalFields, actor Actor) (*entity.Hospital, error) {
-	if err := in.normalise(); err != nil {
-		return nil, err
-	}
-	if existing, err := s.hospitals.FindByCode(ctx, in.Code); err == nil && existing != nil {
-		return nil, ErrHospitalCodeExists
-	}
+func duplicateField(field string) *Error {
+	return newErr(CodeDuplicate, "ข้อมูลนี้ถูกใช้งานแล้ว", map[string]any{"field": field})
+}
 
+func (s *HospitalService) Create(ctx context.Context, in HospitalFields, actor Actor) (*AdminHospital, error) {
+	if e := in.normalise(); e != nil {
+		return nil, e
+	}
 	h := &entity.Hospital{
-		Code:        in.Code,
-		Name:        in.Name,
-		Logo:        in.Logo,
-		Province:    in.Province,
-		District:    in.District,
-		SubDistrict: in.SubDistrict,
-		PostalCode:  in.PostalCode,
-		CreatedAt:   time.Now(),
+		Code: in.Code, Name: in.Name, Logo: in.Logo, Province: in.Province,
+		District: in.District, SubDistrict: in.SubDistrict, PostalCode: in.PostalCode,
+		Active: true, CreatedAt: s.clock.Now(),
 	}
 	id, err := s.hospitals.Create(ctx, h)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, port.ErrDuplicate) {
+			return nil, duplicateField("code")
+		}
+		return nil, internal(err)
 	}
 	h.ID = id
-
-	s.recordAudit(ctx, entity.AuditActionHospitalCreate, actor, h, map[string]any{
-		"code": h.Code,
-		"name": h.Name,
-	})
-	return h, nil
+	s.audit.Log(ctx, entity.AuditActionHospitalCreate, actor, id, h.Name, map[string]any{"code": h.Code})
+	out := toAdminHospital(h, 0)
+	return &out, nil
 }
 
-func (s *HospitalService) Update(ctx context.Context, idHex string, in HospitalFields, actor Actor) (*entity.Hospital, error) {
-	if err := in.normalise(); err != nil {
-		return nil, err
+func (s *HospitalService) Update(ctx context.Context, idHex string, in HospitalFields, actor Actor) (*AdminHospital, error) {
+	if e := in.normalise(); e != nil {
+		return nil, e
 	}
 	id, err := parseOID(idHex)
 	if err != nil {
-		return nil, ErrNotFound
+		return nil, notFound()
 	}
-	current, err := s.hospitals.FindByID(ctx, id)
+	cur, err := s.hospitals.FindByID(ctx, id)
 	if err != nil {
-		return nil, ErrNotFound
+		return nil, mapNotFound(err)
 	}
-	// The code must stay unique — reject it only when another document owns it.
-	if other, err := s.hospitals.FindByCode(ctx, in.Code); err == nil && other != nil && other.ID != id {
-		return nil, ErrHospitalCodeExists
+	updated := *cur
+	updated.Code, updated.Name, updated.Logo = in.Code, in.Name, in.Logo
+	updated.Province, updated.District, updated.SubDistrict, updated.PostalCode = in.Province, in.District, in.SubDistrict, in.PostalCode
+	if in.Active != nil {
+		updated.Active = *in.Active
 	}
-
-	updated := &entity.Hospital{
-		ID:          id,
-		Code:        in.Code,
-		Name:        in.Name,
-		Logo:        in.Logo,
-		Province:    in.Province,
-		District:    in.District,
-		SubDistrict: in.SubDistrict,
-		PostalCode:  in.PostalCode,
-		CreatedAt:   current.CreatedAt,
+	if err := s.hospitals.Update(ctx, id, &updated); err != nil {
+		if errors.Is(err, port.ErrDuplicate) {
+			return nil, duplicateField("code")
+		}
+		return nil, mapNotFound(err)
 	}
-	if err := s.hospitals.Update(ctx, id, updated); err != nil {
-		return nil, err
+	s.audit.Log(ctx, entity.AuditActionHospitalUpdate, actor, id, updated.Name,
+		map[string]any{"code": updated.Code, "oldCode": cur.Code, "oldName": cur.Name})
+	n, err := s.users.CountByHospital(ctx, id)
+	if err != nil {
+		return nil, internal(err)
 	}
-
-	s.recordAudit(ctx, entity.AuditActionHospitalUpdate, actor, updated, map[string]any{
-		"code":    updated.Code,
-		"name":    updated.Name,
-		"oldCode": current.Code,
-		"oldName": current.Name,
-	})
-	return updated, nil
+	out := toAdminHospital(&updated, n)
+	return &out, nil
 }
 
+// Delete soft-deletes (active=false) a hospital that has no users or
+// assignments (§5.6).
 func (s *HospitalService) Delete(ctx context.Context, idHex string, actor Actor) error {
 	id, err := parseOID(idHex)
 	if err != nil {
-		return ErrNotFound
+		return notFound()
 	}
-	current, err := s.hospitals.FindByID(ctx, id)
+	cur, err := s.hospitals.FindByID(ctx, id)
 	if err != nil {
-		return ErrNotFound
+		return mapNotFound(err)
 	}
-	// Users carry a hospitalId reference; deleting the hospital would orphan
-	// them, so the caller has to move or remove those members first.
 	members, err := s.users.CountByHospital(ctx, id)
 	if err != nil {
-		return err
+		return internal(err)
 	}
-	if members > 0 {
-		return ErrHospitalInUse
+	as, err := s.assignments.ListByHospital(ctx, id)
+	if err != nil {
+		return internal(err)
 	}
-	if err := s.hospitals.Delete(ctx, id); err != nil {
-		return err
+	if members > 0 || len(as) > 0 {
+		return newErr(CodeHospitalInUse, "ลบไม่ได้ ยังมีผู้ใช้หรือแบบทดสอบที่ผูกกับโรงพยาบาลนี้อยู่",
+			map[string]any{"users": members, "assignments": len(as)})
 	}
-
-	s.recordAudit(ctx, entity.AuditActionHospitalDelete, actor, current, map[string]any{
-		"code": current.Code,
-		"name": current.Name,
-	})
+	if err := s.hospitals.SetActive(ctx, id, false); err != nil {
+		return mapNotFound(err)
+	}
+	s.audit.Log(ctx, entity.AuditActionHospitalDelete, actor, id, cur.Name, map[string]any{"code": cur.Code})
 	return nil
 }
 
-// recordAudit resolves the actor's display name and appends an audit entry.
-func (s *HospitalService) recordAudit(
-	ctx context.Context,
-	action string,
-	actor Actor,
-	target *entity.Hospital,
-	metadata map[string]any,
-) {
-	if s.audit == nil {
-		return
+// mapNotFound converts a repository error into an application error.
+func mapNotFound(err error) error {
+	if errors.Is(err, port.ErrNotFound) {
+		return notFound()
 	}
-	actorID, _ := primitive.ObjectIDFromHex(actor.ID)
-	actorName := ""
-	if !actorID.IsZero() {
-		if u, err := s.users.FindByID(ctx, actorID); err == nil {
-			actorName = u.FullName
+	return internal(err)
+}
+
+// activeHospital loads a hospital and requires it to be active.
+func loadActiveHospital(ctx context.Context, repo port.HospitalRepository, id primitive.ObjectID) (*entity.Hospital, bool, error) {
+	h, err := repo.FindByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, port.ErrNotFound) {
+			return nil, false, nil
 		}
+		return nil, false, internal(err)
 	}
-	s.audit.Record(ctx, action, RecordParams{
-		ActorID:    actorID,
-		ActorName:  actorName,
-		ActorRole:  actor.Role,
-		TargetID:   target.ID,
-		TargetName: target.Name,
-		IP:         actor.IP,
-		UserAgent:  actor.UserAgent,
-		Metadata:   metadata,
-	})
+	return h, h.Active, nil
 }

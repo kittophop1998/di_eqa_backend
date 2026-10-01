@@ -1,19 +1,21 @@
 package main
 
 import (
+	"context"
 	"log"
+	"time"
 
-	adaptercache "github.com/di-eqa/backend/internal/adapter/cache"
-	adapthttp "github.com/di-eqa/backend/internal/adapter/http/handler"
+	"github.com/di-eqa/backend/internal/adapter/http/handler"
 	"github.com/di-eqa/backend/internal/adapter/http/router"
 	mongorepo "github.com/di-eqa/backend/internal/adapter/repository/mongo"
 	"github.com/di-eqa/backend/internal/adapter/security"
-	adaptws "github.com/di-eqa/backend/internal/adapter/ws"
+	"github.com/di-eqa/backend/internal/adapter/storage"
+	applicationport "github.com/di-eqa/backend/internal/application/port"
 	"github.com/di-eqa/backend/internal/application/service"
 	"github.com/di-eqa/backend/internal/infrastructure/cache"
 	"github.com/di-eqa/backend/internal/infrastructure/config"
 	"github.com/di-eqa/backend/internal/infrastructure/db"
-	"github.com/di-eqa/backend/internal/infrastructure/seed"
+	"github.com/di-eqa/backend/internal/infrastructure/migrate"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -22,90 +24,120 @@ type App struct {
 	Cfg         *config.Config
 	MongoConn   *db.Mongo
 	RedisClient *redis.Client
-	Hub         *adaptws.Hub
 	Deps        router.Deps
 }
 
+// Bootstrap is the composition root: it loads configuration, connects
+// datastores, checks migrations and wires adapters into services and handlers.
+// It contains wiring only, no business rules.
 func Bootstrap() *App {
-	// 1. Configuration
-	cfg := config.Load()
-	log.Println("✅ config loaded")
+	// 1. Configuration (fails fast on a missing/weak secret in production)
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("FATAL: %v", err)
+	}
+	for _, w := range cfg.Warnings {
+		log.Printf("WARN: %s", w)
+	}
+	log.Printf("config loaded (env=%s)", cfg.Env)
 
-	// 2. MongoDB
+	// 2. Datastores
 	mongoConn, err := db.Connect(cfg.MongoURI, cfg.MongoDB)
 	if err != nil {
-		log.Fatalf("❌ mongodb connect error: %v", err)
+		log.Fatalf("FATAL: mongodb connect: %v", err)
 	}
-	log.Println("✅ mongodb connected")
-
-	// 3. Redis
 	redisClient, err := cache.Connect(cfg.RedisAddr, cfg.RedisPassword)
 	if err != nil {
-		log.Fatalf("❌ redis connect error: %v", err)
+		log.Fatalf("FATAL: redis connect: %v", err)
 	}
-	log.Println("✅ redis connected")
-
-	// 4. Seed initial data (non-fatal)
-	if err := seed.Run(mongoConn.DB, cfg.SupabaseURL, cfg.SupabaseBucket); err != nil {
-		log.Printf("⚠️  seed warning: %v", err)
-	} else {
-		log.Println("✅ seed completed")
-	}
-
-	// 5. WebSocket hub (implements port.EventPort)
-	hub := adaptws.NewHub()
-	log.Println("✅ ws hub initialised")
-
-	// 6. Wire repository adapters (driven)
 	database := mongoConn.DB
+
+	// 3. Migrations: apply when RUN_MIGRATIONS=true, otherwise refuse to serve
+	// on an unmigrated database (run cmd/migrate first).
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	store := migrate.NewMongoStore(database)
+	steps := migrate.Steps(database)
+	if cfg.RunMigrations {
+		if _, err := migrate.Run(ctx, store, steps, log.Printf); err != nil {
+			log.Fatalf("FATAL: %v", err)
+		}
+	} else if pending, err := migrate.Pending(ctx, store, steps); err != nil {
+		log.Fatalf("FATAL: %v", err)
+	} else if len(pending) > 0 {
+		log.Fatalf("FATAL: %d database migration(s) pending (first: %d %s). Run `go run ./cmd/migrate` or start with RUN_MIGRATIONS=true",
+			len(pending), pending[0].Version, pending[0].Name)
+	}
+
+	// 4. Driven adapters
 	userRepo := mongorepo.NewUserRepo(database.Collection("users"))
 	hospitalRepo := mongorepo.NewHospitalRepo(database.Collection("hospitals"))
+	cellTypeRepo := mongorepo.NewCellTypeRepo(database.Collection("cell_types"))
+	cellImageRepo := mongorepo.NewCellImageRepo(database.Collection("cell_images"))
 	quizRepo := mongorepo.NewQuizRepo(database.Collection("quizzes"))
-	sessionRepo := mongorepo.NewSessionRepo(database.Collection("sessions"))
-	submissionRepo := mongorepo.NewSubmissionRepo(database.Collection("submissions"))
+	assignmentRepo := mongorepo.NewAssignmentRepo(database.Collection("quiz_assignments"))
+	attemptRepo := mongorepo.NewAttemptRepo(database.Collection("attempts"))
+	certRepo := mongorepo.NewCertificateRepo(database.Collection("certificates"))
 	auditRepo := mongorepo.NewAuditLogRepo(database.Collection("audit_logs"))
 
-	// 7. Wire cache adapter (driven)
-	cacheAdapter := adaptercache.NewRedisCache(redisClient)
-
-	// 8. Wire application services (use cases)
-	auditSvc := service.NewAuditService(auditRepo)
 	jwtService := security.NewJWTService(cfg.JWTSecret, cfg.JWTExpiry)
-	passwordHasher := security.NewBcryptHasher(0)
-	authSvc := service.NewAuthService(userRepo, hospitalRepo, auditSvc, jwtService, passwordHasher)
-	hospitalSvc := service.NewHospitalService(hospitalRepo, userRepo, auditSvc)
-	userMgmtSvc := service.NewUserService(userRepo, hospitalRepo, auditSvc)
-	quizSvc := service.NewQuizService(
-		quizRepo, sessionRepo, submissionRepo, userRepo, hospitalRepo,
-		cacheAdapter, hub, cfg.SupabaseURL, cfg.SupabaseBucket,
-	)
-	sessionSvc := service.NewSessionService(sessionRepo, quizRepo, hospitalRepo, hub)
+	hasher := security.NewBcryptHasher(0)
+	rnd := security.NewCryptoRandomness()
+	clock := security.SystemClock{}
+	images := buildImageStore(cfg)
 
-	// 9. Wire HTTP handler adapters (driving)
-	wsLookup := adapthttp.NewWSUserLookup(userRepo, hospitalRepo)
+	// 5. Application services
+	auditSvc := service.NewAuditService(auditRepo)
+	authSvc := service.NewAuthService(userRepo, hospitalRepo, auditSvc, jwtService, hasher, clock)
+	hospitalSvc := service.NewHospitalService(hospitalRepo, userRepo, assignmentRepo, auditSvc, clock)
+	adminUserSvc := service.NewAdminUserService(userRepo, hospitalRepo, auditSvc, clock)
+	cellSvc := service.NewCellLibraryService(cellTypeRepo, cellImageRepo, images)
+	quizAdminSvc := service.NewQuizAdminService(quizRepo, assignmentRepo, hospitalRepo, userRepo, attemptRepo,
+		cellTypeRepo, cellImageRepo, auditSvc, clock)
+	myQuizSvc := service.NewMyQuizService(quizRepo, assignmentRepo, attemptRepo, certRepo, clock)
+	attemptSvc := service.NewAttemptService(quizRepo, assignmentRepo, attemptRepo, certRepo, hospitalRepo,
+		cellTypeRepo, cellImageRepo, images, rnd, clock)
+	certSvc := service.NewCertificateService(certRepo)
+
+	// 6. Initial super_admin from env (only when none exists)
+	created, err := service.NewAdminBootstrap(userRepo, hasher, clock).
+		EnsureSuperAdmin(ctx, cfg.AdminInitialUsername, cfg.AdminInitialPassword)
+	if err != nil {
+		log.Fatalf("FATAL: admin bootstrap: %v", err)
+	}
+	if created {
+		log.Printf("created initial super_admin %q; remove ADMIN_INITIAL_PASSWORD from the environment", cfg.AdminInitialUsername)
+	}
+
+	// 7. Driving adapters
 	deps := router.Deps{
-		Cfg:            cfg,
-		TokenVerifier:  jwtService,
-		Redis:          redisClient,
-		HospHandler:    adapthttp.NewHospitalHandler(hospitalSvc),
-		AuthHandler:    adapthttp.NewAuthHandler(authSvc),
-		QuizHandler:    adapthttp.NewQuizHandler(quizSvc),
-		SessionHandler: adapthttp.NewSessionHandler(sessionSvc),
-		WSHandler:      adapthttp.NewWSHandler(hub, wsLookup),
-		UserHandler:    adapthttp.NewUserHandler(userMgmtSvc),
-		AuditHandler:   adapthttp.NewAuditHandler(auditSvc),
+		AllowedOrigins:  cfg.AllowedOrigins,
+		Redis:           redisClient,
+		TokenVerifier:   jwtService,
+		Authenticator:   authSvc,
+		AuthHandler:     handler.NewAuthHandler(authSvc),
+		HospitalHandler: handler.NewHospitalHandler(hospitalSvc),
+		MeHandler:       handler.NewMeHandler(myQuizSvc, attemptSvc, certSvc),
+		AdminHandler:    handler.NewAdminHandler(adminUserSvc, cellSvc, quizAdminSvc),
+		AuditHandler:    handler.NewAuditHandler(auditSvc),
 	}
+	return &App{Cfg: cfg, MongoConn: mongoConn, RedisClient: redisClient, Deps: deps}
+}
 
-	return &App{
-		Cfg:         cfg,
-		MongoConn:   mongoConn,
-		RedisClient: redisClient,
-		Hub:         hub,
-		Deps:        deps,
+// buildImageStore prefers a local directory (dev) and falls back to Supabase.
+func buildImageStore(cfg *config.Config) applicationport.ImageStore {
+	var stores []applicationport.ImageStore
+	if cfg.ImageLocalDir != "" {
+		stores = append(stores, storage.NewLocalStore(cfg.ImageLocalDir))
 	}
+	if cfg.SupabaseURL != "" {
+		stores = append(stores, storage.NewSupabaseStore(cfg.SupabaseURL, cfg.SupabaseBucket))
+	}
+	return storage.NewChain(stores...)
 }
 
 // Close releases all resources held by App.
 func (a *App) Close() {
 	a.MongoConn.Close()
+	_ = a.RedisClient.Close()
 }

@@ -15,14 +15,14 @@ import (
 // SessionService handles session lifecycle use cases.
 type SessionService struct {
 	sessions  port.SessionRepository
-	quizzes   port.QuizRepository
+	quizzes   port.LegacyQuizRepository
 	hospitals port.HospitalRepository
 	events    port.EventPort
 }
 
 func NewSessionService(
 	sessions port.SessionRepository,
-	quizzes port.QuizRepository,
+	quizzes port.LegacyQuizRepository,
 	hospitals port.HospitalRepository,
 	events port.EventPort,
 ) *SessionService {
@@ -67,7 +67,7 @@ func (s *SessionService) Create(ctx context.Context, in CreateSessionInput) (*en
 		}
 		hospID = parsed
 	default:
-		if in.Role == entity.RoleAdmin || in.Role == entity.RoleSuperAdmin {
+		if entity.Role(in.Role).IsStaff() {
 			return nil, errBadRequest("admin must provide hospitalCode")
 		}
 		hospID, _ = parseOID(in.CallerHospID)
@@ -166,7 +166,7 @@ func (s *SessionService) GetByCode(ctx context.Context, code string) (*entity.Se
 
 func (s *SessionService) ListActive(ctx context.Context, role, hospitalIDHex string) ([]entity.Session, error) {
 	var hospID *primitive.ObjectID
-	if role != entity.RoleAdmin && role != entity.RoleSuperAdmin && hospitalIDHex != "" {
+	if !entity.Role(role).IsStaff() && hospitalIDHex != "" {
 		if oid, err := parseOID(hospitalIDHex); err == nil {
 			hospID = &oid
 		}

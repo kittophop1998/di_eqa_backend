@@ -2,21 +2,33 @@ package service
 
 import (
 	"context"
+	"errors"
+	"net/mail"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	applicationport "github.com/di-eqa/backend/internal/application/port"
 	"github.com/di-eqa/backend/internal/domain/entity"
 	"github.com/di-eqa/backend/internal/domain/port"
 )
 
-// AuthService handles user registration and login use cases.
+var usernameRe = regexp.MustCompile(`^[a-z0-9._-]{3,32}$`)
+
+const (
+	minPasswordLen = 8
+	maxPasswordLen = 72 // bcrypt input limit
+)
+
+// AuthService handles registration, login and per-request authentication.
 type AuthService struct {
 	users     port.UserRepository
 	hospitals port.HospitalRepository
 	audit     *AuditService
 	tokens    applicationport.TokenIssuer
 	passwords applicationport.PasswordHasher
+	clock     applicationport.Clock
 }
 
 func NewAuthService(
@@ -25,237 +37,246 @@ func NewAuthService(
 	audit *AuditService,
 	tokens applicationport.TokenIssuer,
 	passwords applicationport.PasswordHasher,
+	clock applicationport.Clock,
 ) *AuthService {
-	return &AuthService{users: u, hospitals: h, audit: audit, tokens: tokens, passwords: passwords}
+	return &AuthService{users: u, hospitals: h, audit: audit, tokens: tokens, passwords: passwords, clock: clock}
 }
 
-// RegisterAddress mirrors entity.Address in the application layer.
-type RegisterAddress struct {
-	AddressNo   string
-	Building    string
-	SubDistrict string
-	District    string
-	Province    string
-	PostalCode  string
-}
-
-// RegisterInput carries data needed to register a new user.
-//
-// MemberType drives the flow:
-//   - "internal" (default): HospitalCode is required; user is bound to a hospital.
-//   - "external"           : HospitalCode is ignored; user stands alone.
-type RegisterInput struct {
-	MemberType   string
-	HospitalCode string
-
-	Username string
-	Password string
-
-	FirstName string
-	LastName  string
-	FullName  string
-	Email     string
-
-	Clinic       string
-	LabName      string
-	HospitalType string
-	BedSize      string
-
-	Address RegisterAddress
-
+// ProfileInput is the optional registration profile (§5.4).
+type ProfileInput struct {
+	Clinic          string
+	LabName         string
+	HospitalType    string
+	BedSize         string
+	Address         entity.Address
 	CertificateYear int
+}
 
-	// Request context fields used for audit logging. Optional.
+// RegisterInput carries the self-registration request. Role, status and
+// hospital are deliberately absent: the client cannot choose them (BR-40).
+type RegisterInput struct {
+	Username            string
+	Password            string
+	FirstName           string
+	LastName            string
+	Email               string
+	RequestedHospitalID string
+	Profile             ProfileInput
+
 	IP        string
 	UserAgent string
 }
 
-// RegisterOutput carries the result of a successful registration.
-type RegisterOutput struct {
-	Token string
-	User  entity.PublicUser
-}
-
-func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*RegisterOutput, error) {
-	memberType := normalizeMemberType(in.MemberType)
-	if memberType == "" {
-		return nil, ErrInvalidMemberType
-	}
-
+// Register creates a pending user. It issues no token (D2).
+func (s *AuthService) Register(ctx context.Context, in RegisterInput) error {
 	username := strings.ToLower(strings.TrimSpace(in.Username))
-	fullName := entity.ComposeFullName(in.FirstName, in.LastName, in.FullName)
+	first := strings.TrimSpace(in.FirstName)
+	last := strings.TrimSpace(in.LastName)
+	email := strings.TrimSpace(in.Email)
 
-	// Enforce global username uniqueness so login-without-hospitalCode works.
-	count, err := s.users.CountByUsername(ctx, username)
+	var issues []entity.FieldIssue
+	if !usernameRe.MatchString(username) {
+		issues = append(issues, entity.FieldIssue{Field: "username", Issue: "must be 3-32 characters of a-z, 0-9, '.', '_' or '-'"})
+	}
+	if utf8.RuneCountInString(in.Password) < minPasswordLen {
+		issues = append(issues, entity.FieldIssue{Field: "password", Issue: "must be at least 8 characters"})
+	} else if len(in.Password) > maxPasswordLen {
+		issues = append(issues, entity.FieldIssue{Field: "password", Issue: "must be at most 72 bytes"})
+	}
+	if first == "" {
+		issues = append(issues, entity.FieldIssue{Field: "firstName", Issue: "is required"})
+	}
+	if last == "" {
+		issues = append(issues, entity.FieldIssue{Field: "lastName", Issue: "is required"})
+	}
+	if utf8.RuneCountInString(first) > 100 || utf8.RuneCountInString(last) > 100 {
+		issues = append(issues, entity.FieldIssue{Field: "firstName", Issue: "name is too long"})
+	}
+	if email != "" {
+		if a, err := mail.ParseAddress(email); err != nil || a.Address != email || len(email) > 254 {
+			issues = append(issues, entity.FieldIssue{Field: "email", Issue: "is not a valid email address"})
+		}
+	}
+	var hospital *entity.Hospital
+	hid, err := parseOID(in.RequestedHospitalID)
 	if err != nil {
-		return nil, err
+		issues = append(issues, entity.FieldIssue{Field: "requestedHospitalId", Issue: "must be a valid hospital id"})
+	} else if h, err := s.hospitals.FindByID(ctx, hid); err != nil || !h.Active {
+		if err != nil && !errors.Is(err, port.ErrNotFound) {
+			return internal(err)
+		}
+		issues = append(issues, entity.FieldIssue{Field: "requestedHospitalId", Issue: "hospital not found or inactive"})
+	} else {
+		hospital = h
 	}
-	if count > 0 {
-		return nil, ErrUsernameExists
-	}
-
-	profile := entity.Profile{
-		MemberType:   memberType,
-		FirstName:    strings.TrimSpace(in.FirstName),
-		LastName:     strings.TrimSpace(in.LastName),
-		Clinic:       strings.TrimSpace(in.Clinic),
-		LabName:      strings.TrimSpace(in.LabName),
-		HospitalType: strings.TrimSpace(in.HospitalType),
-		BedSize:      strings.TrimSpace(in.BedSize),
-		Address: entity.Address{
-			AddressNo:   strings.TrimSpace(in.Address.AddressNo),
-			Building:    strings.TrimSpace(in.Address.Building),
-			SubDistrict: strings.TrimSpace(in.Address.SubDistrict),
-			District:    strings.TrimSpace(in.Address.District),
-			Province:    strings.TrimSpace(in.Address.Province),
-			PostalCode:  strings.TrimSpace(in.Address.PostalCode),
-		},
-		CertificateYear: in.CertificateYear,
+	if len(issues) > 0 {
+		return validation(issues...)
 	}
 
 	hash, err := s.passwords.Hash(in.Password)
 	if err != nil {
-		return nil, err
+		return internal(err)
 	}
-
+	p := in.Profile
 	user := &entity.User{
-		Username:  username,
-		FullName:  fullName,
-		Email:     strings.TrimSpace(in.Email),
-		Password:  hash,
-		Role:      entity.RoleUser,
-		Profile:   profile,
-		CreatedAt: time.Now(),
+		Username:            username,
+		UsernameLower:       username,
+		FullName:            entity.ComposeFullName(first, last, username),
+		Email:               email,
+		Password:            hash,
+		Role:                entity.RoleUser, // never taken from the client
+		Status:              entity.UserPending,
+		RequestedHospitalID: hospital.ID,
+		Profile: entity.Profile{
+			FirstName:       first,
+			LastName:        last,
+			Clinic:          strings.TrimSpace(p.Clinic),
+			LabName:         strings.TrimSpace(p.LabName),
+			HospitalType:    strings.TrimSpace(p.HospitalType),
+			BedSize:         strings.TrimSpace(p.BedSize),
+			Address:         p.Address,
+			CertificateYear: p.CertificateYear,
+		},
+		CreatedAt: s.clock.Now(),
 	}
-
-	var hospital *entity.Hospital
-
-	if memberType == entity.MemberInternal {
-		h, err := s.hospitals.FindByCode(ctx, strings.ToUpper(strings.TrimSpace(in.HospitalCode)))
-		if err != nil {
-			return nil, ErrHospitalNotFound
-		}
-		hospital = h
-		user.HospitalID = hospital.ID
-	}
-
 	id, err := s.users.Create(ctx, user)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, port.ErrDuplicate) {
+			return newErr(CodeUsernameTaken, "ชื่อผู้ใช้นี้ถูกใช้งานแล้ว กรุณาเลือกชื่อใหม่", nil)
+		}
+		return internal(err)
 	}
 	user.ID = id
 
-	hospitalIDHex := ""
-	if hospital != nil {
-		hospitalIDHex = hospital.ID.Hex()
-	}
-	token, err := s.tokens.Issue(applicationport.TokenClaims{
-		UserID: user.ID.Hex(), HospitalID: hospitalIDHex, Role: user.Role,
+	s.audit.Record(ctx, entity.AuditActionUserRegister, RecordParams{
+		ActorID: id, ActorName: user.FullName, ActorRole: string(user.Role),
+		TargetID: id, TargetName: user.FullName,
+		IP: in.IP, UserAgent: in.UserAgent,
+		Metadata: map[string]any{"username": username, "requestedHospitalId": hospital.ID.Hex()},
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	// Audit: self-registered users are both actor and target. Hospital info
-	// (when present) is stored in metadata so the super-admin UI can show
-	// where the new account belongs without an extra lookup.
-	if s.audit != nil {
-		meta := map[string]any{
-			"memberType": memberType,
-			"username":   user.Username,
-		}
-		if hospital != nil {
-			meta["hospitalCode"] = hospital.Code
-			meta["hospitalName"] = hospital.Name
-		}
-		s.audit.Record(ctx, entity.AuditActionUserRegister, RecordParams{
-			ActorID:    user.ID,
-			ActorName:  user.FullName,
-			ActorRole:  user.Role,
-			TargetID:   user.ID,
-			TargetName: user.FullName,
-			IP:         in.IP,
-			UserAgent:  in.UserAgent,
-			Metadata:   meta,
-		})
-	}
-
-	return &RegisterOutput{Token: token, User: user.ToPublic(hospital)}, nil
+	return nil
 }
 
-// normalizeMemberType coerces a free-form member type string into a known
-// constant, returning "" when the value is not recognised.
-// An empty input is treated as "internal" for backward compatibility.
-func normalizeMemberType(v string) string {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "", entity.MemberInternal:
-		return entity.MemberInternal
-	case entity.MemberExternal:
-		return entity.MemberExternal
-	default:
-		return ""
-	}
+// Me is the authenticated user's profile (§5.3).
+type Me struct {
+	ID       string       `json:"id"`
+	Username string       `json:"username"`
+	FullName string       `json:"fullName"`
+	Email    *string      `json:"email"`
+	Role     entity.Role  `json:"role"`
+	Status   string       `json:"status"`
+	Hospital *HospitalRef `json:"hospital"`
 }
 
-// LoginInput carries credentials. HospitalCode is no longer required;
-// login is now a global username + password lookup.
+// LoginInput carries credentials.
 type LoginInput struct {
 	Username string
 	Password string
 }
 
-// LoginOutput carries the result of a successful login.
+// LoginOutput is the successful login result.
 type LoginOutput struct {
-	Token string
-	User  entity.PublicUser
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	User      Me        `json:"user"`
 }
 
-// Login performs a global username+password authentication — no hospitalCode needed.
-// It resolves the user's hospital (if any) and embeds it in the public user struct.
+// Login authenticates by username+password, then gates on account status
+// (BR-41). No token is issued for a non-active account.
 func (s *AuthService) Login(ctx context.Context, in LoginInput) (*LoginOutput, error) {
 	username := strings.ToLower(strings.TrimSpace(in.Username))
+	if username == "" || in.Password == "" {
+		return nil, validation(entity.FieldIssue{Field: "username", Issue: "username and password are required"})
+	}
+	invalid := newErr(CodeInvalidCredentials, "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง", nil)
 
 	user, err := s.users.FindByUsername(ctx, username)
 	if err != nil {
-		return nil, ErrInvalidCredentials
+		if errors.Is(err, port.ErrNotFound) {
+			return nil, invalid
+		}
+		return nil, internal(err)
 	}
-
 	if err := s.passwords.Compare(user.Password, in.Password); err != nil {
-		return nil, ErrInvalidCredentials
+		return nil, invalid
+	}
+	switch user.Status {
+	case entity.UserActive:
+	case entity.UserPending:
+		return nil, newErr(CodeAccountPending, "บัญชีของคุณอยู่ระหว่างรอผู้ดูแลระบบอนุมัติ", nil)
+	case entity.UserRejected:
+		return nil, newErr(CodeAccountRejected, "คำขอสมัครของคุณไม่ได้รับการอนุมัติ", nil)
+	default:
+		return nil, newErr(CodeAccountDisabled, "บัญชีของคุณถูกระงับการใช้งาน", nil)
+	}
+	if !user.Role.Valid() {
+		return nil, forbidden()
 	}
 
-	var hospital *entity.Hospital
-	if !user.HospitalID.IsZero() {
-		hospital, _ = s.hospitals.FindByID(ctx, user.HospitalID)
+	token, exp, err := s.tokens.Issue(applicationport.TokenClaims{UserID: user.ID.Hex()})
+	if err != nil {
+		return nil, internal(err)
 	}
-
-	hospitalIDHex := ""
-	if !user.HospitalID.IsZero() {
-		hospitalIDHex = user.HospitalID.Hex()
-	}
-
-	token, err := s.tokens.Issue(applicationport.TokenClaims{
-		UserID: user.ID.Hex(), HospitalID: hospitalIDHex, Role: user.Role,
-	})
+	me, err := s.toMe(ctx, user)
 	if err != nil {
 		return nil, err
 	}
-	return &LoginOutput{Token: token, User: user.ToPublic(hospital)}, nil
+	return &LoginOutput{Token: token, ExpiresAt: exp.UTC(), User: *me}, nil
 }
 
-func (s *AuthService) Me(ctx context.Context, userIDHex string) (*entity.PublicUser, error) {
+// Authenticate resolves a token subject to a Principal using the database as
+// the only source of role, status and hospital (BR-02).
+func (s *AuthService) Authenticate(ctx context.Context, userIDHex string) (*Principal, error) {
+	unauth := newErr(CodeUnauthenticated, "กรุณาเข้าสู่ระบบ", nil)
 	id, err := parseOID(userIDHex)
 	if err != nil {
-		return nil, ErrNotFound
+		return nil, unauth
 	}
 	user, err := s.users.FindByID(ctx, id)
 	if err != nil {
-		return nil, ErrNotFound
+		if errors.Is(err, port.ErrNotFound) {
+			return nil, unauth
+		}
+		return nil, internal(err)
 	}
-	var hospital *entity.Hospital
-	if !user.HospitalID.IsZero() {
-		hospital, _ = s.hospitals.FindByID(ctx, user.HospitalID)
+	if !user.CanLogin() || !user.Role.Valid() {
+		return nil, unauth
 	}
-	pub := user.ToPublic(hospital)
-	return &pub, nil
+	return &Principal{
+		UserID: user.ID, Username: user.Username, FullName: user.FullName,
+		Role: user.Role, Status: user.Status, HospitalID: user.HospitalID,
+	}, nil
+}
+
+// Me returns the profile of an authenticated principal.
+func (s *AuthService) Me(ctx context.Context, p *Principal) (*Me, error) {
+	user, err := s.users.FindByID(ctx, p.UserID)
+	if err != nil {
+		if errors.Is(err, port.ErrNotFound) {
+			return nil, newErr(CodeUnauthenticated, "กรุณาเข้าสู่ระบบ", nil)
+		}
+		return nil, internal(err)
+	}
+	return s.toMe(ctx, user)
+}
+
+func (s *AuthService) toMe(ctx context.Context, u *entity.User) (*Me, error) {
+	me := &Me{
+		ID: u.ID.Hex(), Username: u.Username, FullName: u.FullName,
+		Role: u.Role, Status: string(entity.UserActive),
+	}
+	if u.Email != "" {
+		e := u.Email
+		me.Email = &e
+	}
+	if !u.HospitalID.IsZero() {
+		h, err := s.hospitals.FindByID(ctx, u.HospitalID)
+		if err != nil && !errors.Is(err, port.ErrNotFound) {
+			return nil, internal(err)
+		}
+		if err == nil {
+			me.Hospital = hospitalRef(h)
+		}
+	}
+	return me, nil
 }

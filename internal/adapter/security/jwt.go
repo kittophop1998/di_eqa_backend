@@ -9,53 +9,52 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// JWTService signs and verifies JWTs. It is an adapter: neither domain nor
-// application code needs to know the JWT library or signing algorithm.
+const jwtIssuer = "di-eqa"
+
+// JWTService signs and verifies JWTs. Tokens carry only sub, iat and exp:
+// role, status and hospital are never trusted from a token (BR-02).
 type JWTService struct {
-	secret string
+	secret []byte
 	ttl    time.Duration
+	now    func() time.Time
 }
 
 func NewJWTService(secret string, ttl time.Duration) *JWTService {
-	return &JWTService{secret: secret, ttl: ttl}
+	return &JWTService{secret: []byte(secret), ttl: ttl, now: time.Now}
 }
 
-func (s *JWTService) Issue(identity applicationport.TokenClaims) (string, error) {
-	claims := claims{
-		UserID:     identity.UserID,
-		HospitalID: identity.HospitalID,
-		Role:       identity.Role,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(s.ttl)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			Issuer:    "di-eqa",
-		},
+func (s *JWTService) Issue(identity applicationport.TokenClaims) (string, time.Time, error) {
+	now := s.now()
+	exp := now.Add(s.ttl)
+	claims := jwt.RegisteredClaims{
+		Subject:   identity.UserID,
+		ExpiresAt: jwt.NewNumericDate(exp),
+		IssuedAt:  jwt.NewNumericDate(now),
+		Issuer:    jwtIssuer,
 	}
-	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(s.secret))
+	tok, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.secret)
+	return tok, exp.UTC(), err
 }
 
-// Verify is used by the HTTP authentication adapter before a request enters a
-// use case. Invalid or unsigned tokens are rejected here.
+// Verify checks signature, algorithm, issuer and expiry. An expired but
+// otherwise valid token yields applicationport.ErrTokenExpired.
 func (s *JWTService) Verify(tokenString string) (applicationport.TokenClaims, error) {
-	parsed, err := jwt.ParseWithClaims(tokenString, &claims{}, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, errors.New("invalid signing method")
-		}
-		return []byte(s.secret), nil
-	})
+	var claims jwt.RegisteredClaims
+	_, err := jwt.ParseWithClaims(tokenString, &claims,
+		func(*jwt.Token) (any, error) { return s.secret, nil },
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithIssuer(jwtIssuer),
+		jwt.WithExpirationRequired(),
+		jwt.WithTimeFunc(s.now),
+	)
 	if err != nil {
+		if errors.Is(err, jwt.ErrTokenExpired) {
+			return applicationport.TokenClaims{}, applicationport.ErrTokenExpired
+		}
 		return applicationport.TokenClaims{}, err
 	}
-	jwtClaims, ok := parsed.Claims.(*claims)
-	if !ok || !parsed.Valid {
-		return applicationport.TokenClaims{}, errors.New("invalid token")
+	if claims.Subject == "" {
+		return applicationport.TokenClaims{}, errors.New("token has no subject")
 	}
-	return applicationport.TokenClaims{UserID: jwtClaims.UserID, HospitalID: jwtClaims.HospitalID, Role: jwtClaims.Role}, nil
-}
-
-type claims struct {
-	UserID     string `json:"uid"`
-	HospitalID string `json:"hid"`
-	Role       string `json:"role"`
-	jwt.RegisteredClaims
+	return applicationport.TokenClaims{UserID: claims.Subject}, nil
 }

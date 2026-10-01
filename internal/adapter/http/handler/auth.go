@@ -1,10 +1,13 @@
 package handler
 
 import (
-	"errors"
+	"bytes"
+	"encoding/json"
+	"net/http"
 
-	utils "github.com/di-eqa/backend/internal/adapter/http/response"
+	"github.com/di-eqa/backend/internal/adapter/http/response"
 	"github.com/di-eqa/backend/internal/application/service"
+	"github.com/di-eqa/backend/internal/domain/entity"
 	"github.com/gin-gonic/gin"
 )
 
@@ -13,125 +16,97 @@ type AuthHandler struct {
 	svc *service.AuthService
 }
 
-func NewAuthHandler(svc *service.AuthService) *AuthHandler {
-	return &AuthHandler{svc: svc}
+func NewAuthHandler(svc *service.AuthService) *AuthHandler { return &AuthHandler{svc: svc} }
+
+// flexAddress accepts either the structured address object or a plain string
+// (stored in addressNo) so both client shapes of `profile.address` work.
+type flexAddress struct{ entity.Address }
+
+func (a *flexAddress) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || bytes.Equal(b, []byte("null")) {
+		return nil
+	}
+	if b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		a.Address = entity.Address{AddressNo: s}
+		return nil
+	}
+	return json.Unmarshal(b, &a.Address)
 }
 
-// addressInput is the JSON payload for the delivery address fields.
-type addressInput struct {
-	AddressNo   string `json:"addressNo"`
-	Building    string `json:"building"`
-	SubDistrict string `json:"subDistrict"`
-	District    string `json:"district"`
-	Province    string `json:"province"`
-	PostalCode  string `json:"postalCode"`
-}
-
-// registerInput models the /auth/register JSON payload.
-//
-// HospitalCode is only required for memberType="internal". For "external"
-// users it is ignored. fullName is still accepted as a backward-compatible
-// fallback when callers haven't been updated to send firstName/lastName.
-type registerInput struct {
-	MemberType   string `json:"memberType"`
-	HospitalCode string `json:"hospitalCode"`
-
-	Username string `json:"username" binding:"required,min=3,max=32"`
-	Password string `json:"password" binding:"required,min=6"`
-
-	FirstName string `json:"firstName"`
-	LastName  string `json:"lastName"`
-	FullName  string `json:"fullName"`
-	Email     string `json:"email"`
-
-	Clinic       string `json:"clinic"`
-	LabName      string `json:"labName"`
-	HospitalType string `json:"hospitalType"`
-	BedSize      string `json:"bedSize"`
-
-	Address addressInput `json:"address"`
-
-	CertificateYear int `json:"certificateYear"`
+// registerBody models POST /auth/register. role, status and hospitalId are
+// not fields here, so a client cannot set them (BR-40).
+type registerBody struct {
+	Username            string `json:"username"`
+	Password            string `json:"password"`
+	FirstName           string `json:"firstName"`
+	LastName            string `json:"lastName"`
+	Email               string `json:"email"`
+	RequestedHospitalID string `json:"requestedHospitalId"`
+	Profile             *struct {
+		Clinic          string      `json:"clinic"`
+		LabName         string      `json:"labName"`
+		HospitalType    string      `json:"hospitalType"`
+		BedSize         string      `json:"bedSize"`
+		Address         flexAddress `json:"address"`
+		CertificateYear int         `json:"certificateYear"`
+	} `json:"profile"`
 }
 
 func (h *AuthHandler) Register(c *gin.Context) {
-	var in registerInput
-	if err := c.ShouldBindJSON(&in); err != nil {
-		utils.ErrBadRequest(c, err.Error())
+	var in registerBody
+	if !bind(c, &in, false) {
 		return
 	}
-
-	out, err := h.svc.Register(c.Request.Context(), service.RegisterInput{
-		MemberType:   in.MemberType,
-		HospitalCode: in.HospitalCode,
-		Username:     in.Username,
-		Password:     in.Password,
-		FirstName:    in.FirstName,
-		LastName:     in.LastName,
-		FullName:     in.FullName,
-		Email:        in.Email,
-		Clinic:       in.Clinic,
-		LabName:      in.LabName,
-		HospitalType: in.HospitalType,
-		BedSize:      in.BedSize,
-		Address: service.RegisterAddress{
-			AddressNo:   in.Address.AddressNo,
-			Building:    in.Address.Building,
-			SubDistrict: in.Address.SubDistrict,
-			District:    in.Address.District,
-			Province:    in.Address.Province,
-			PostalCode:  in.Address.PostalCode,
-		},
-		CertificateYear: in.CertificateYear,
-		IP:              c.ClientIP(),
-		UserAgent:       c.Request.UserAgent(),
-	})
-	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrHospitalNotFound):
-			utils.ErrBadRequest(c, "ไม่พบรหัสโรงพยาบาลนี้")
-		case errors.Is(err, service.ErrUsernameExists):
-			utils.ErrConflict(c, "username นี้ถูกใช้งานแล้ว กรุณาเลือก username ใหม่")
-		case errors.Is(err, service.ErrInvalidMemberType):
-			utils.ErrBadRequest(c, "ประเภทสมาชิกไม่ถูกต้อง")
-		default:
-			utils.ErrInternalErr(c, err)
+	req := service.RegisterInput{
+		Username: in.Username, Password: in.Password, FirstName: in.FirstName, LastName: in.LastName,
+		Email: in.Email, RequestedHospitalID: in.RequestedHospitalID,
+		IP: c.ClientIP(), UserAgent: c.Request.UserAgent(),
+	}
+	if p := in.Profile; p != nil {
+		req.Profile = service.ProfileInput{
+			Clinic: p.Clinic, LabName: p.LabName, HospitalType: p.HospitalType, BedSize: p.BedSize,
+			Address: p.Address.Address, CertificateYear: p.CertificateYear,
 		}
+	}
+	if err := h.svc.Register(c.Request.Context(), req); err != nil {
+		response.FromError(c, err)
 		return
 	}
-	utils.RespondOK(c, gin.H{"token": out.Token, "user": out.User})
+	response.Created(c, gin.H{"status": "pending"})
 }
 
-type loginInput struct {
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required"`
+type loginBody struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 func (h *AuthHandler) Login(c *gin.Context) {
-	var in loginInput
-	if err := c.ShouldBindJSON(&in); err != nil {
-		utils.ErrBadRequest(c, err.Error())
+	var in loginBody
+	if !bind(c, &in, false) {
 		return
 	}
-	out, err := h.svc.Login(c.Request.Context(), service.LoginInput{
-		Username: in.Username,
-		Password: in.Password,
-	})
+	out, err := h.svc.Login(c.Request.Context(), service.LoginInput{Username: in.Username, Password: in.Password})
 	if err != nil {
-		utils.ErrUnauthorized(c, "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง")
+		response.FromError(c, err)
 		return
 	}
-	utils.RespondOK(c, gin.H{"token": out.Token, "user": out.User})
+	c.JSON(http.StatusOK, out)
 }
 
 func (h *AuthHandler) Me(c *gin.Context) {
-	uid, _ := c.Get("userId")
-	userIDStr, _ := uid.(string)
-
-	pub, err := h.svc.Me(c.Request.Context(), userIDStr)
-	if err != nil {
-		utils.ErrUnauthorized(c, "user not found")
+	p, ok := principal(c)
+	if !ok {
 		return
 	}
-	utils.RespondOK(c, pub)
+	me, err := h.svc.Me(c.Request.Context(), p)
+	if err != nil {
+		response.FromError(c, err)
+		return
+	}
+	response.OK(c, me)
 }

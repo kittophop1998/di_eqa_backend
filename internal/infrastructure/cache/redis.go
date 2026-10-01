@@ -40,7 +40,7 @@ func Connect(addr, password string) (*redis.Client, error) {
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		return nil, err
 	}
-	log.Printf("✅ Redis connected: %s", addr)
+	log.Printf("Redis connected")
 	return rdb, nil
 }
 
