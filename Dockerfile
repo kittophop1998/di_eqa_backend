@@ -9,9 +9,6 @@ RUN go mod download
 
 COPY . .
 
-# Local images are optional and public/ is not tracked in Git.
-RUN mkdir -p /app/public
-
 RUN CGO_ENABLED=0 GOOS=linux go build -o /app/server ./cmd/server
 
 FROM alpine:3.19
