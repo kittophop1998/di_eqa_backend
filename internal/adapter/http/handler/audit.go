@@ -3,28 +3,36 @@ package handler
 import (
 	"strconv"
 
-	"github.com/di-eqa/backend/internal/adapter/http/response"
+	utils "github.com/di-eqa/backend/internal/adapter/http/response"
 	"github.com/di-eqa/backend/internal/application/service"
 	"github.com/gin-gonic/gin"
 )
 
-// AuditHandler exposes the audit-log read endpoint (super_admin only).
+// AuditHandler is the HTTP driving adapter for audit-log queries.
+// Recording is performed implicitly by other services, so this adapter only
+// exposes a read endpoint for the super-admin UI.
 type AuditHandler struct {
 	svc *service.AuditService
 }
 
-func NewAuditHandler(svc *service.AuditService) *AuditHandler { return &AuditHandler{svc: svc} }
+func NewAuditHandler(svc *service.AuditService) *AuditHandler {
+	return &AuditHandler{svc: svc}
+}
 
-// List handles GET /api/admin/audit-logs?action=...&page=1&limit=50
+// List handles GET /api/audit-logs?action=...&page=1&limit=50
 func (h *AuditHandler) List(c *gin.Context) {
+	action := c.Query("action")
 	page, _ := strconv.ParseInt(c.DefaultQuery("page", "1"), 10, 64)
 	limit, _ := strconv.ParseInt(c.DefaultQuery("limit", "50"), 10, 64)
+
 	out, err := h.svc.List(c.Request.Context(), service.ListAuditLogsInput{
-		Action: c.Query("action"), Page: page, Limit: limit,
+		Action: action,
+		Page:   page,
+		Limit:  limit,
 	})
 	if err != nil {
-		response.FromError(c, err)
+		utils.ErrInternalErr(c, err)
 		return
 	}
-	response.OK(c, out)
+	utils.RespondOK(c, out)
 }

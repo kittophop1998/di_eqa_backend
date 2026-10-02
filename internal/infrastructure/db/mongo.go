@@ -26,7 +26,7 @@ func Connect(uri, dbName string) (*Mongo, error) {
 	if err := client.Ping(ctx, nil); err != nil {
 		return nil, err
 	}
-	log.Printf("MongoDB connected (db=%s)", dbName)
+	log.Printf("✅ MongoDB connected: %s", uri)
 	return &Mongo{Client: client, DB: client.Database(dbName)}, nil
 }
 

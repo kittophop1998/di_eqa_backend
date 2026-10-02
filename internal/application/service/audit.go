@@ -59,16 +59,6 @@ func (s *AuditService) Record(ctx context.Context, action string, p RecordParams
 	}
 }
 
-// Log records an admin/governance action performed by actor on a target
-// (BR-51). Like Record, failures are logged and never returned.
-func (s *AuditService) Log(ctx context.Context, action string, actor Actor, targetID primitive.ObjectID, targetName string, meta map[string]any) {
-	s.Record(ctx, action, RecordParams{
-		ActorID: actor.ID, ActorName: actor.Name, ActorRole: string(actor.Role),
-		TargetID: targetID, TargetName: targetName,
-		IP: actor.IP, UserAgent: actor.UserAgent, Metadata: meta,
-	})
-}
-
 // AuditLogItem is the DTO returned to API clients.
 type AuditLogItem struct {
 	ID         string         `json:"id"`

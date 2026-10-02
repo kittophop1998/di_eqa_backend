@@ -1,12 +1,14 @@
 package handler
 
 import (
-	"github.com/di-eqa/backend/internal/adapter/http/response"
+	"errors"
+
+	utils "github.com/di-eqa/backend/internal/adapter/http/response"
 	"github.com/di-eqa/backend/internal/application/service"
 	"github.com/gin-gonic/gin"
 )
 
-// HospitalHandler serves the public hospital list and admin hospital management.
+// HospitalHandler is the HTTP driving adapter for hospital use cases.
 type HospitalHandler struct {
 	svc *service.HospitalService
 }
@@ -15,83 +17,115 @@ func NewHospitalHandler(svc *service.HospitalService) *HospitalHandler {
 	return &HospitalHandler{svc: svc}
 }
 
-// PublicList handles GET /api/public/hospitals: {id,name} of active hospitals only.
-func (h *HospitalHandler) PublicList(c *gin.Context) {
-	items, err := h.svc.ListPublic(c.Request.Context())
+func (h *HospitalHandler) List(c *gin.Context) {
+	q := c.Query("q")
+	list, err := h.svc.List(c.Request.Context(), q)
 	if err != nil {
-		response.FromError(c, err)
+		utils.ErrInternalErr(c, err)
 		return
 	}
-	response.OK(c, gin.H{"items": items})
+	utils.RespondOK(c, list)
 }
 
-// AdminList handles GET /api/admin/hospitals.
-func (h *HospitalHandler) AdminList(c *gin.Context) {
-	active, ok := queryBool(c, "active")
-	if !ok {
-		return
-	}
-	out, err := h.svc.List(c.Request.Context(), service.ListHospitalsInput{
-		Query: c.Query("q"), Active: active, Page: queryInt(c, "page"), PageSize: queryInt(c, "pageSize"),
-	})
+func (h *HospitalHandler) GetByCode(c *gin.Context) {
+	hospital, err := h.svc.GetByCode(c.Request.Context(), c.Param("code"))
 	if err != nil {
-		response.FromError(c, err)
+		utils.ErrNotFound(c, "hospital not found")
 		return
 	}
-	response.OK(c, out)
+	utils.RespondOK(c, hospital)
 }
 
+// hospitalBody is the JSON payload accepted by Create and Update.
 type hospitalBody struct {
-	Code        string `json:"code"`
-	Name        string `json:"name"`
+	Code        string `json:"code"        binding:"required"`
+	Name        string `json:"name"        binding:"required"`
 	Logo        string `json:"logo"`
 	Province    string `json:"province"`
 	District    string `json:"district"`
 	SubDistrict string `json:"subDistrict"`
 	PostalCode  string `json:"postalCode"`
-	Active      *bool  `json:"active"`
 }
 
-func (b hospitalBody) fields() service.HospitalFields {
+func (b hospitalBody) toFields() service.HospitalFields {
 	return service.HospitalFields{
-		Code: b.Code, Name: b.Name, Logo: b.Logo, Province: b.Province, District: b.District,
-		SubDistrict: b.SubDistrict, PostalCode: b.PostalCode, Active: b.Active,
+		Code:        b.Code,
+		Name:        b.Name,
+		Logo:        b.Logo,
+		Province:    b.Province,
+		District:    b.District,
+		SubDistrict: b.SubDistrict,
+		PostalCode:  b.PostalCode,
 	}
 }
 
-// Create handles POST /api/admin/hospitals.
+// actorFrom builds the audit actor from the authenticated request context.
+func actorFrom(c *gin.Context) service.Actor {
+	id, _ := c.Get("userId")
+	idStr, _ := id.(string)
+	role, _ := c.Get("role")
+	roleStr, _ := role.(string)
+	return service.Actor{
+		ID:        idStr,
+		Role:      roleStr,
+		IP:        c.ClientIP(),
+		UserAgent: c.Request.UserAgent(),
+	}
+}
+
+// respondHospitalErr maps application errors onto HTTP status codes.
+func respondHospitalErr(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, service.ErrNotFound):
+		utils.ErrNotFound(c, "ไม่พบโรงพยาบาล")
+	case errors.Is(err, service.ErrHospitalCodeExists):
+		utils.ErrConflict(c, "รหัสโรงพยาบาลนี้ถูกใช้แล้ว")
+	case errors.Is(err, service.ErrHospitalInUse):
+		utils.ErrConflict(c, "ลบไม่ได้ — ยังมีผู้ใช้สังกัดโรงพยาบาลนี้อยู่")
+	case errors.Is(err, service.ErrInvalidPostalCode):
+		utils.ErrBadRequest(c, "รหัสไปรษณีย์ต้องเป็นตัวเลข 5 หลัก")
+	case errors.Is(err, service.ErrBadInput):
+		utils.ErrBadRequest(c, "กรุณากรอกรหัสและชื่อโรงพยาบาล")
+	default:
+		utils.ErrInternalErr(c, err)
+	}
+}
+
+// Create handles POST /api/hospitals
 func (h *HospitalHandler) Create(c *gin.Context) {
 	var body hospitalBody
-	if !bind(c, &body, false) {
+	if err := c.ShouldBindJSON(&body); err != nil {
+		utils.ErrBadRequest(c, err.Error())
 		return
 	}
-	out, err := h.svc.Create(c.Request.Context(), body.fields(), actorFrom(c))
+	hospital, err := h.svc.Create(c.Request.Context(), body.toFields(), actorFrom(c))
 	if err != nil {
-		response.FromError(c, err)
+		respondHospitalErr(c, err)
 		return
 	}
-	response.Created(c, out)
+	utils.RespondCreated(c, hospital)
 }
 
-// Update handles PUT /api/admin/hospitals/:id.
+// Update handles PUT /api/hospitals/:id
 func (h *HospitalHandler) Update(c *gin.Context) {
 	var body hospitalBody
-	if !bind(c, &body, false) {
+	if err := c.ShouldBindJSON(&body); err != nil {
+		utils.ErrBadRequest(c, err.Error())
 		return
 	}
-	out, err := h.svc.Update(c.Request.Context(), c.Param("id"), body.fields(), actorFrom(c))
+	hospital, err := h.svc.Update(c.Request.Context(), c.Param("id"), body.toFields(), actorFrom(c))
 	if err != nil {
-		response.FromError(c, err)
+		respondHospitalErr(c, err)
 		return
 	}
-	response.OK(c, out)
+	utils.RespondOK(c, hospital)
 }
 
-// Delete handles DELETE /api/admin/hospitals/:id (soft delete).
+// Delete handles DELETE /api/hospitals/:id
 func (h *HospitalHandler) Delete(c *gin.Context) {
 	if err := h.svc.Delete(c.Request.Context(), c.Param("id"), actorFrom(c)); err != nil {
-		response.FromError(c, err)
+		respondHospitalErr(c, err)
 		return
 	}
-	response.NoContent(c)
+	utils.RespondOK(c, gin.H{"ok": true})
 }

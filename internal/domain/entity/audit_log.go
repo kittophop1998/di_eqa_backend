@@ -14,17 +14,6 @@ const (
 	AuditActionHospitalCreate = "hospital.create"
 	AuditActionHospitalUpdate = "hospital.update"
 	AuditActionHospitalDelete = "hospital.delete"
-	AuditActionUserApprove    = "user.approve"
-	AuditActionUserReject     = "user.reject"
-	AuditActionUserUpdate     = "user.update"
-	AuditActionQuizCreate     = "quiz.create"
-	AuditActionQuizUpdate     = "quiz.update"
-	AuditActionQuizHospitals  = "quiz.set_hospitals"
-	AuditActionQuizPublish    = "quiz.publish"
-	AuditActionQuizArchive    = "quiz.archive"
-	AuditActionQuizDelete     = "quiz.delete"
-	AuditActionAssignOpen     = "assignment.open"
-	AuditActionAssignClose    = "assignment.close"
 )
 
 // AuditLog is an immutable record of a security/governance-relevant event.

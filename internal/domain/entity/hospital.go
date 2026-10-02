@@ -6,7 +6,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-// Hospital is a participating laboratory site. Active=false is a soft delete.
+// Hospital is a participating laboratory site. Its address fields mirror the
+// naming used by entity.Address so both can be rendered by the same UI.
 type Hospital struct {
 	ID          primitive.ObjectID `bson:"_id,omitempty" json:"id"`
 	Code        string             `bson:"code"          json:"code"`
@@ -16,6 +17,5 @@ type Hospital struct {
 	District    string             `bson:"district"      json:"district"`
 	SubDistrict string             `bson:"subDistrict"   json:"subDistrict"`
 	PostalCode  string             `bson:"postalCode"    json:"postalCode"`
-	Active      bool               `bson:"active"        json:"active"`
 	CreatedAt   time.Time          `bson:"createdAt"     json:"createdAt"`
 }

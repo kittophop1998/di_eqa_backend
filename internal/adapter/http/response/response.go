@@ -1,113 +1,110 @@
-// Package response owns JSON response formatting for the HTTP adapter. Every
-// error, from handlers, middleware, rate limiting and panic recovery, uses the
-// single shape of backlog §5.2.
+// Package response owns JSON response formatting for the HTTP adapter.
 package response
 
 import (
-	"errors"
-	"log"
 	"net/http"
 
-	"github.com/di-eqa/backend/internal/application/service"
 	"github.com/gin-gonic/gin"
 )
 
-// RequestIDKey is the gin context key holding the request id.
-const RequestIDKey = "requestId"
+// --------------------------------------------------------------------------
+// Standard envelope types
+// --------------------------------------------------------------------------
 
-// RequestIDHeader is the response (and accepted request) header.
-const RequestIDHeader = "X-Request-Id"
-
-// ErrBody is the canonical error body.
-type ErrBody struct {
-	Code      string         `json:"code"`
-	Message   string         `json:"message"`
-	Details   map[string]any `json:"details,omitempty"`
-	RequestID string         `json:"requestId"`
+// ErrResponse is the canonical error body returned to callers.
+type ErrResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
 }
 
-// statusByCode maps application error codes to HTTP statuses.
-var statusByCode = map[string]int{
-	service.CodeValidation:         http.StatusBadRequest,
-	service.CodeUnauthenticated:    http.StatusUnauthorized,
-	service.CodeTokenExpired:       http.StatusUnauthorized,
-	service.CodeInvalidCredentials: http.StatusUnauthorized,
-	service.CodeAccountPending:     http.StatusForbidden,
-	service.CodeAccountRejected:    http.StatusForbidden,
-	service.CodeAccountDisabled:    http.StatusForbidden,
-	service.CodeForbidden:          http.StatusForbidden,
-	service.CodeNotFound:           http.StatusNotFound,
-	service.CodeUsernameTaken:      http.StatusConflict,
-	service.CodeInvalidState:       http.StatusConflict,
-	service.CodeQuizNotOpen:        http.StatusConflict,
-	service.CodeMaxAttempts:        http.StatusConflict,
-	service.CodeAlreadyPassed:      http.StatusConflict,
-	service.CodeAttemptNotInProg:   http.StatusConflict,
-	service.CodeAttemptExpired:     http.StatusConflict,
-	service.CodeAttemptNotSubmit:   http.StatusConflict,
-	service.CodeQuizNotPublished:   http.StatusConflict,
-	service.CodeQuizWindowEnded:    http.StatusConflict,
-	service.CodePoolTooSmall:       http.StatusConflict,
-	service.CodeAssignmentAttempts: http.StatusConflict,
-	service.CodeHospitalInUse:      http.StatusConflict,
-	service.CodeLastSuperAdmin:     http.StatusConflict,
-	service.CodeDuplicate:          http.StatusConflict,
-	service.CodeInternal:           http.StatusInternalServerError,
+// OKResponse is a generic success envelope for simple ack responses.
+type OKResponse struct {
+	Message string `json:"message"`
 }
 
-// StatusOf returns the HTTP status for an application error code.
-func StatusOf(code string) int {
-	if s, ok := statusByCode[code]; ok {
-		return s
-	}
-	return http.StatusInternalServerError
+// --------------------------------------------------------------------------
+// Success helpers
+// --------------------------------------------------------------------------
+
+// RespondOK writes HTTP 200 with arbitrary data as the body.
+func RespondOK(c *gin.Context, data any) {
+	c.JSON(http.StatusOK, data)
 }
 
-// RequestID returns the id of the current request ("" if none).
-func RequestID(c *gin.Context) string {
-	if v, ok := c.Get(RequestIDKey); ok {
-		if s, ok := v.(string); ok {
-			return s
-		}
-	}
-	return ""
+// RespondCreated writes HTTP 201 with arbitrary data as the body.
+func RespondCreated(c *gin.Context, data any) {
+	c.JSON(http.StatusCreated, data)
 }
 
-// Error writes an error body and aborts the chain.
-func Error(c *gin.Context, status int, code, message string, details map[string]any) {
-	c.AbortWithStatusJSON(status, ErrBody{Code: code, Message: message, Details: details, RequestID: RequestID(c)})
+// RespondMessage writes HTTP 200 with a plain message string.
+func RespondMessage(c *gin.Context, msg string) {
+	c.JSON(http.StatusOK, OKResponse{Message: msg})
 }
 
-// FromError writes the response for any error returned by a service. Unknown
-// errors and INTERNAL errors produce a generic body; the real cause is logged
-// with the request id and never sent to the client (BR-52).
-func FromError(c *gin.Context, err error) {
-	var ae *service.Error
-	if !errors.As(err, &ae) {
-		log.Printf("request_id=%s unexpected error: %v", RequestID(c), err)
-		Error(c, http.StatusInternalServerError, service.CodeInternal, "เกิดข้อผิดพลาดภายในระบบ", nil)
-		return
-	}
-	if ae.Code == service.CodeInternal {
-		log.Printf("request_id=%s internal error: %v", RequestID(c), errors.Unwrap(ae))
-		Error(c, http.StatusInternalServerError, service.CodeInternal, "เกิดข้อผิดพลาดภายในระบบ", nil)
-		return
-	}
-	Error(c, StatusOf(ae.Code), ae.Code, ae.Message, ae.Details)
-}
+// --------------------------------------------------------------------------
+// Error helpers  (all abort after writing so downstream handlers are skipped)
+// --------------------------------------------------------------------------
 
-// Validation writes a 400 VALIDATION_ERROR with one field issue.
-func Validation(c *gin.Context, field, issue string) {
-	Error(c, http.StatusBadRequest, service.CodeValidation, "ข้อมูลไม่ถูกต้อง", map[string]any{
-		"fields": []map[string]string{{"field": field, "issue": issue}},
+// ErrBadRequest writes 400 and aborts.
+func ErrBadRequest(c *gin.Context, msg string) {
+	c.AbortWithStatusJSON(http.StatusBadRequest, ErrResponse{
+		Code:    http.StatusBadRequest,
+		Message: msg,
 	})
 }
 
-// OK writes 200 with data.
-func OK(c *gin.Context, data any) { c.JSON(http.StatusOK, data) }
+// ErrUnauthorized writes 401 and aborts.
+func ErrUnauthorized(c *gin.Context, msg string) {
+	c.AbortWithStatusJSON(http.StatusUnauthorized, ErrResponse{
+		Code:    http.StatusUnauthorized,
+		Message: msg,
+	})
+}
 
-// Created writes 201 with data.
-func Created(c *gin.Context, data any) { c.JSON(http.StatusCreated, data) }
+// ErrForbidden writes 403 and aborts.
+func ErrForbidden(c *gin.Context, msg string) {
+	c.AbortWithStatusJSON(http.StatusForbidden, ErrResponse{
+		Code:    http.StatusForbidden,
+		Message: msg,
+	})
+}
 
-// NoContent writes 204.
-func NoContent(c *gin.Context) { c.Status(http.StatusNoContent) }
+// ErrNotFound writes 404 and aborts.
+func ErrNotFound(c *gin.Context, msg string) {
+	c.AbortWithStatusJSON(http.StatusNotFound, ErrResponse{
+		Code:    http.StatusNotFound,
+		Message: msg,
+	})
+}
+
+// ErrConflict writes 409 and aborts.
+func ErrConflict(c *gin.Context, msg string) {
+	c.AbortWithStatusJSON(http.StatusConflict, ErrResponse{
+		Code:    http.StatusConflict,
+		Message: msg,
+	})
+}
+
+// ErrTooManyRequests writes 429 and aborts.
+func ErrTooManyRequests(c *gin.Context, msg string) {
+	c.AbortWithStatusJSON(http.StatusTooManyRequests, ErrResponse{
+		Code:    http.StatusTooManyRequests,
+		Message: msg,
+	})
+}
+
+// ErrInternal writes 500 and aborts.
+// Prefer passing a short, user-safe message; log the raw error separately.
+func ErrInternal(c *gin.Context, msg string) {
+	c.AbortWithStatusJSON(http.StatusInternalServerError, ErrResponse{
+		Code:    http.StatusInternalServerError,
+		Message: msg,
+	})
+}
+
+// ErrInternalErr is a convenience wrapper that uses err.Error() as the message.
+// Only use this during development; in production you may want to hide the
+// original error from the client.
+func ErrInternalErr(c *gin.Context, err error) {
+	ErrInternal(c, err.Error())
+}

@@ -1,137 +1,98 @@
-// Package router wires every HTTP route to its handler.
 package router
+
+// Package router wires every HTTP route to its handler.
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/di-eqa/backend/internal/adapter/http/handler"
 	"github.com/di-eqa/backend/internal/adapter/http/middleware"
-	"github.com/di-eqa/backend/internal/adapter/http/response"
+	"github.com/di-eqa/backend/internal/infrastructure/config"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 )
 
-// Deps bundles everything the router needs.
+// Deps bundles all HTTP handlers the router needs.
 type Deps struct {
-	// AllowedOrigins is the exact CORS allow-list; empty means no CORS headers
-	// (same-origin only). "*" is never used (A-03).
-	AllowedOrigins []string
-	// Redis backs rate limiting. When nil, rate limiting is skipped (tests).
-	Redis *redis.Client
-
-	TokenVerifier middleware.TokenVerifier
-	Authenticator middleware.Authenticator
-
-	AuthHandler     *handler.AuthHandler
-	HospitalHandler *handler.HospitalHandler
-	MeHandler       *handler.MeHandler
-	AdminHandler    *handler.AdminHandler
-	AuditHandler    *handler.AuditHandler
+	Cfg            *config.Config
+	Redis          *redis.Client
+	HospHandler    *handler.HospitalHandler
+	AuthHandler    *handler.AuthHandler
+	QuizHandler    *handler.QuizHandler
+	SessionHandler *handler.SessionHandler
+	WSHandler      *handler.WSHandler
+	UserHandler    *handler.UserHandler
+	AuditHandler   *handler.AuditHandler
+	TokenVerifier  middleware.TokenVerifier
 }
 
-// Setup registers all middleware and routes on r.
-//
-// The legacy live-session surface (/quizzes, /submissions, /sessions,
-// /leaderboard, /ws, /hospitals, /users, /audit-logs) is intentionally NOT
-// registered: it trusted client input and JWT-embedded roles. Epic G deletes
-// the code; until then nothing routes to it.
+// Setup registers all middleware and route groups on the provided *gin.Engine.
 func Setup(r *gin.Engine, d Deps) *gin.Engine {
-	r.Use(middleware.RequestID(), middleware.Recovery(), middleware.AccessLog())
+	// CORS
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"*"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "Accept"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: false,
+	}))
 
-	if len(d.AllowedOrigins) > 0 {
-		r.Use(cors.New(cors.Config{
-			AllowOrigins:     d.AllowedOrigins,
-			AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-			AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "Accept", response.RequestIDHeader},
-			ExposeHeaders:    []string{"Content-Length", response.RequestIDHeader, "Retry-After"},
-			AllowCredentials: false,
-		}))
-	}
+	// Rate limiters
+	// Strict: auth endpoints — 10 requests/minute per IP (brute-force protection)
+	authLimiter := middleware.RateLimit(d.Redis, "10-M")
+	// General: all other API routes — 120 requests/minute per IP
+	apiLimiter := middleware.RateLimit(d.Redis, "120-M")
 
-	limiter := func(format string) gin.HandlerFunc {
-		if d.Redis == nil {
-			return func(c *gin.Context) { c.Next() }
-		}
-		return middleware.RateLimit(d.Redis, format)
-	}
-	authLimiter := limiter("10-M")
-	apiLimiter := limiter("120-M")
-
-	auth := middleware.Auth(d.TokenVerifier, d.Authenticator)
-	staff := middleware.RequireStaff()
-
+	// Health check (no rate limit)
 	r.GET("/api/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "di-eqa-backend"})
 	})
 
-	// Public
-	pub := r.Group("/api", apiLimiter)
-	pub.GET("/public/hospitals", d.HospitalHandler.PublicList)
-	pub.POST("/auth/register", authLimiter, d.AuthHandler.Register)
-	pub.POST("/auth/login", authLimiter, d.AuthHandler.Login)
+	// Public routes
+	public := r.Group("/api")
+	public.Use(apiLimiter)
+	public.GET("/hospitals", d.HospHandler.List)
+	public.GET("/hospitals/:code", d.HospHandler.GetByCode)
+	// Auth endpoints use the stricter limiter
+	public.POST("/auth/register", authLimiter, d.AuthHandler.Register)
+	public.POST("/auth/login", authLimiter, d.AuthHandler.Login)
 
-	// Authenticated (any active user)
-	authed := r.Group("/api", apiLimiter, auth)
+	// Authenticated routes
+	authed := r.Group("/api")
+	authed.Use(apiLimiter, middleware.Auth(d.TokenVerifier))
+
 	authed.GET("/auth/me", d.AuthHandler.Me)
+	authed.GET("/quizzes", d.QuizHandler.List)
+	authed.GET("/quizzes/:id", d.QuizHandler.Get)
+	authed.POST("/quizzes/:id/submit", d.QuizHandler.Submit)
+	authed.GET("/submissions/me", d.QuizHandler.MyHistory)
+	authed.GET("/submissions/:id", d.QuizHandler.GetSubmission)
+	authed.GET("/sessions/active", d.SessionHandler.ListActive)
+	authed.GET("/sessions/:id", d.SessionHandler.Get)
+	authed.GET("/sessions/code/:code", d.SessionHandler.GetByCode)
+	authed.GET("/sessions/:id/leaderboard", d.QuizHandler.Leaderboard)
+	authed.GET("/ws", d.WSHandler.Handle)
 
-	me := authed.Group("/me")
-	me.GET("/quizzes", d.MeHandler.ListQuizzes)
-	me.GET("/quizzes/:quizId", d.MeHandler.GetQuiz)
-	me.POST("/quizzes/:quizId/attempts", d.MeHandler.StartAttempt)
-	me.GET("/attempts", d.MeHandler.ListAttempts)
-	me.GET("/attempts/:attemptId", d.MeHandler.GetAttempt)
-	me.PUT("/attempts/:attemptId/answers", d.MeHandler.SaveAnswers)
-	me.POST("/attempts/:attemptId/submit", d.MeHandler.Submit)
-	me.GET("/attempts/:attemptId/result", d.MeHandler.Result)
-	me.GET("/attempts/:attemptId/questions/:questionId/image", d.MeHandler.Image)
-	me.GET("/certificates", d.MeHandler.ListCertificates)
-	me.GET("/certificates/:id", d.MeHandler.GetCertificate)
+	// Admin + super_admin routes (session management)
+	adminGroup := authed.Group("")
+	adminGroup.Use(middleware.RequireRole("instructor", "admin", "super_admin"))
+	adminGroup.POST("/sessions", d.SessionHandler.Create)
+	adminGroup.POST("/sessions/:id/start", d.SessionHandler.Start)
+	adminGroup.POST("/sessions/:id/end", d.SessionHandler.End)
 
-	// Admin: one group, one role check (BR-01, BR-03). Role `user` gets 403.
-	admin := authed.Group("/admin", staff)
-	admin.GET("/hospitals", d.HospitalHandler.AdminList)
-	admin.POST("/hospitals", d.HospitalHandler.Create)
-	admin.PUT("/hospitals/:id", d.HospitalHandler.Update)
-	admin.DELETE("/hospitals/:id", d.HospitalHandler.Delete)
+	// Super-admin only routes (user management + audit log)
+	superAdmin := authed.Group("")
+	superAdmin.Use(middleware.RequireRole("super_admin"))
+	superAdmin.GET("/users", d.UserHandler.List)
+	superAdmin.PATCH("/users/:id/role", d.UserHandler.UpdateRole)
+	superAdmin.GET("/audit-logs", d.AuditHandler.List)
+	// Hospital management. The public GET tree already owns /hospitals/:code;
+	// these live in the POST/PUT/DELETE trees, so the wildcard names differ
+	// without conflicting.
+	superAdmin.POST("/hospitals", d.HospHandler.Create)
+	superAdmin.PUT("/hospitals/:id", d.HospHandler.Update)
+	superAdmin.DELETE("/hospitals/:id", d.HospHandler.Delete)
 
-	admin.GET("/users", d.AdminHandler.ListUsers)
-	admin.POST("/users/:id/approve", d.AdminHandler.ApproveUser)
-	admin.POST("/users/:id/reject", d.AdminHandler.RejectUser)
-	admin.PATCH("/users/:id", d.AdminHandler.PatchUser)
-
-	admin.GET("/cell-types", d.AdminHandler.ListCellTypes)
-	admin.GET("/cell-images", d.AdminHandler.ListCellImages)
-
-	admin.GET("/quizzes", d.AdminHandler.ListQuizzes)
-	admin.POST("/quizzes", d.AdminHandler.CreateQuiz)
-	admin.GET("/quizzes/:id", d.AdminHandler.GetQuiz)
-	admin.PUT("/quizzes/:id", d.AdminHandler.UpdateQuiz)
-	admin.DELETE("/quizzes/:id", d.AdminHandler.DeleteQuiz)
-	admin.PUT("/quizzes/:id/hospitals", d.AdminHandler.SetQuizHospitals)
-	admin.POST("/quizzes/:id/publish", d.AdminHandler.PublishQuiz)
-	admin.POST("/quizzes/:id/archive", d.AdminHandler.ArchiveQuiz)
-	admin.POST("/quizzes/:id/hospitals/:hospitalId/open", d.AdminHandler.OpenAssignment)
-	admin.POST("/quizzes/:id/hospitals/:hospitalId/close", d.AdminHandler.CloseAssignment)
-
-	// super_admin only
-	super := middleware.RequireSuperAdmin()
-	admin.PATCH("/users/:id/role", super, d.AdminHandler.SetUserRole)
-	admin.GET("/audit-logs", super, d.AuditHandler.List)
-
-	// Unknown paths. Anything under /api/admin/ is authenticated and
-	// role-checked first, so a `user` gets 403 (not a probe-able 404).
-	r.NoRoute(func(c *gin.Context) {
-		if strings.HasPrefix(c.Request.URL.Path, "/api/admin/") {
-			if auth(c); c.IsAborted() {
-				return
-			}
-			if staff(c); c.IsAborted() {
-				return
-			}
-		}
-		response.Error(c, http.StatusNotFound, "NOT_FOUND", "ไม่พบข้อมูลที่ต้องการ", nil)
-	})
 	return r
 }
